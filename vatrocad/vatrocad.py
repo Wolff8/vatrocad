@@ -140,12 +140,15 @@ def prune_supabase_austria(days=MAX_AGE_DAYS):
         return "off"
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    report_cutoff = (now - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
     stale_live = (now - timedelta(minutes=40)).isoformat(timespec="seconds")
     hdr = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Prefer": "return=minimal"}
     results = []
     for label, url in (
-        # Age-out: anything past the retention window.
-        ("age", f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&occurred=lt.{cutoff}"),
+        # Age-out: live dispatch rows past the retention window; the border
+        # belt's after-action reports get the longer window, they arrive late.
+        ("age", f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&region=in.(noe,ooe)&occurred=lt.{cutoff}"),
+        ("reports", f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&region=in.(stmk,ktn)&occurred=lt.{report_cutoff}"),
         # NÖ "running" rows are re-pushed (last_seen refreshed) every poll for
         # as long as the call is open; one not re-seen for 40 minutes has
         # closed and its exact-time history row has replaced it.
@@ -1338,6 +1341,10 @@ def src_hac():
 # separate "currently running" endpoint, OÖ from per-unit end times.
 # ==========================================================================
 AT_MAX_AGE_DAYS = 3
+# Styria/Carinthia after-action reports are posted hours to days after the
+# call and a district publishes a few a week; a 3-day window would leave the
+# border belt empty most of the time, so those rows live a week.
+AT_REPORT_MAX_AGE_DAYS = 7
 
 # German → Slovenian glossary for the fixed vocabulary these systems use.
 # A phrase glossary, not a general translator: longest phrases match first,
@@ -1673,6 +1680,218 @@ def src_at_ooe():
     return out, status
 
 
+# ── Border belt with Slovenia: Styria + Carinthia ─────────────────────────
+# Neither state exposes a reachable dispatch log: Styria's live overview
+# (einsatzuebersicht.lfv.steiermark.at) does not answer from outside Austria,
+# Carinthia's (feuerwehr.einsatz.or.at) is login-only. What is open are the
+# after-action reports the district commands and the border brigades publish
+# on their WordPress/Jimdo sites — per call, dated, with the alarm time in the
+# text — plus the Styrian LFV's statewide daily report list. Slower than a
+# dispatch feed (hours, not minutes) but real per-incident data for the belt
+# from Bad Radkersburg to Villach.
+#   (label, region, state, feed URL, ref prefix, fallback (lat, lon) when the
+#    text names no town — the district's seat)
+AT_FEEDS = [
+    ("BFKDO Klagenfurt-Land · poročila", "ktn", "Kärnten",
+     "https://www.bfkdo-klagenfurtland.at/category/einsaetze/feed/", "KTN-KL", (46.62, 14.30)),
+    ("BFKDO Villach-Land · poročila", "ktn", "Kärnten",
+     "https://www.bfkdo-villachland.at/category/einsaetze/feed/", "KTN-VL", (46.60, 13.85)),
+    ("BFKDO Wolfsberg · poročila", "ktn", "Kärnten",
+     "https://www.bfkdo-wolfsberg.at/category/berichte/einsaetze/feed/", "KTN-WO", (46.84, 14.84)),
+    ("BFK Völkermarkt · poročila", "ktn", "Kärnten",
+     "https://www.bfk-voelkermarkt.at/wp/feed/", "KTN-VK", (46.66, 14.63)),
+    ("FF Völkermarkt · poročila", "ktn", "Kärnten",
+     "https://www.ffvk.at/category/einsatzberichte/feed/", "KTN-FFVK", (46.662, 14.634)),
+    ("FF Lavamünd · poročila", "ktn", "Kärnten",
+     "https://www.feuerwehr-lavamuend.at/category/einsatz/feed/", "KTN-LAV", (46.64, 14.95)),
+    ("FF Mureck · poročila", "stmk", "Steiermark",
+     "https://www.feuerwehr-mureck.at/category/einsatzberichte/feed/", "STMK-MUR", (46.71, 15.77)),
+    ("FF Bad Radkersburg · poročila", "stmk", "Steiermark",
+     "https://www.ff-badradkersburg.at/rss/blog", "STMK-RAD", (46.685, 15.985)),
+    ("FF Feldbach · poročila", "stmk", "Steiermark",
+     "https://www.feuerwehr-feldbach.at/feed/", "STMK-FB", (46.95, 15.89)),
+]
+
+# Posts on these sites that are not interventions: competitions, anniversaries,
+# blessings, elections, courses. An exercise ("Übung") is kept and tagged.
+AT_REPORT_SKIP = re.compile(
+    r"Ausflug|Jubil|\d+\s*Jahre|Leistungsprüf|Leistungsabzeichen|Bewerb|fest\b|Frühschoppen|Ehrung|"
+    r"Angelobung|Wahl\b|Kurs\b|Lehrgang|Spende|Weihnacht|Nikolaus|Ferien|Tag der offenen|"
+    r"versammlung|Wissenstest|Segnung|Rückblick|Statistik|vergangenen Wochen|Jahresbericht|"
+    r"Neues Fahrzeug|Fahrzeugübergabe|Sanitäter|Ausbildung|Florian|Dank\b", re.I)
+# Narrative German, not type codes: what the report is about.
+AT_REPORT_CATCODE = [
+    (r"Übung", "exercise"),
+    (r"Hubschrauber|Notarzt|Rettungsdienst|Tragehilfe|Rettungshubschrauber", "ems"),
+    (r"Unfall|VU\s?\d|prallt|Kollision|Zusammensto|Motorrad|überschlag|von der Fahrbahn|streift|"
+     r"Zwischenfall|Entgleis|\bZug\b|Frontal", "accident"),
+    (r"Brand|brennt|Feuer\b|Rauch|Flammen", "fire"),
+    (r"Suchaktion|vermisst|Person|Menschenrettung|Personenrettung|Tier|Katze|Hund|Kuh|Pferd", "rescue"),
+    (r"Unwetter|Sturm|Hochwasser|Überflut|Starkregen|Schnee|Baum|Ölspur|Öl\b|Gas|Chlor|Schadstoff|"
+     r"geborgen|Bergung|Wasserschaden|Auspump|Keller|Fahrzeugbergung|Türöffnung|Technisch", "tech"),
+    (r"Einsatz|Alarm|alarmiert", "other"),
+]
+_AT_TOWN_STOP = {"Bronze", "Silber", "Gold", "Brand", "Vollbrand", "Flammen", "Kürze", "Einsatz",
+                 "Zusammenarbeit", "Not", "Gefahr", "Aktion", "Sicherheit", "Höhe", "Tiefe", "Richtung",
+                 "Folge", "Zukunft", "Bewegung", "Kärnten", "Steiermark", "Österreich", "Bereich",
+                 "Abschnitt", "Bezirk", "Land", "Wald", "Wiese", "Feld", "Garage", "Keller", "Haus",
+                 "Wohnhaus", "Gebäude", "Schwierigkeiten", "Vollalarm", "Dauereinsatz", "Sommer",
+                 "Frühjahr", "Herbst", "Winter", "Nacht", "Fahrt", "Anwesenheit", "Betrieb", "See"}
+_AT_TOWN_RE = re.compile(
+    r"\((?:Markt|Stadt)?[Gg]emeinde\s+([A-ZÄÖÜ][\wäöüß.-]+(?:\s+(?:am|an der|im|ob|bei|in der)\s+[A-ZÄÖÜ][\wäöüß-]+)?)\)"
+    r"|\b(?:in|bei)\s+([A-ZÄÖÜ][\wäöüß-]{2,}(?:\s+(?:am|an der|im|ob|bei)\s+[A-ZÄÖÜ][\wäöüß-]+)?)")
+
+
+def _at_report_category(text: str):
+    if re.search(r"Übung", text):
+        return "exercise"
+    if AT_REPORT_SKIP.search(text):
+        return None
+    for pat, cat in AT_REPORT_CATCODE:
+        if re.search(pat, text, re.I):
+            return cat
+    return None
+
+
+def _at_report_town(text: str):
+    """First place name the report names; None when it only names a road."""
+    for m in _AT_TOWN_RE.finditer(text):
+        town = (m.group(1) or m.group(2)).strip(".-")
+        if town.split()[0] not in _AT_TOWN_STOP and not re.match(r"[A-Z]\d", town):
+            return town
+    return None
+
+
+def _at_report_when(text: str, published: datetime):
+    """Alarm date/time from the narrative ("Am 06.09.2026 um 09:29 Uhr …",
+    "gegen 16:10 Uhr"), else the publication stamp. A narrative date in the
+    future (a typo) falls back to the publication date."""
+    date = published.strftime("%Y-%m-%d")
+    m = re.search(r"\b[Aa]m\s+(\d{1,2})\.\s?(\d{1,2})\.\s?(\d{4})", text)
+    if m:
+        cand = f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+        if cand <= published.strftime("%Y-%m-%d"):
+            date = cand
+    t = re.search(r"(?:um|gegen)\s+(\d{1,2})[:.](\d{2})\s*Uhr", text)
+    time_ = f"{int(t.group(1)):02d}:{t.group(2)}" if t else published.strftime("%H:%M")
+    return date, time_
+
+
+def _parse_pubdate(pub: str):
+    for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z"):
+        try:
+            dt = datetime.strptime(pub.strip(), fmt)
+            return dt.astimezone(CEST) if dt.tzinfo else dt.replace(tzinfo=CEST)
+        except ValueError:
+            continue
+    return None
+
+
+def make_at_feed(label, region, state, url, prefix, fallback):
+    """One fetcher for every border-belt report feed (WordPress or Jimdo RSS)."""
+
+    def fetch_source():
+        out = []
+        text, status = fetch(url)
+        if text is None:
+            return out, status
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError:
+            return out, "error: bad XML"
+        cutoff = (datetime.now(CEST) - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+        ns = {"content": "http://purl.org/rss/1.0/modules/content/"}
+        for it in root.findall(".//item"):
+            title = tidy(strip_tags(it.findtext("title") or ""))
+            body = tidy(strip_tags((it.findtext("content:encoded", namespaces=ns)
+                                    or it.findtext("description") or "")))
+            body = re.sub(r"Der Beitrag .*? erschien zuerst auf .*?\.", "", body)
+            published = _parse_pubdate(it.findtext("pubDate") or "")
+            if published is None:
+                continue
+            cat = _at_report_category(title) or _at_report_category(body[:300])
+            if cat is None:
+                continue
+            date, time_ = _at_report_when(body, published)
+            if date < cutoff:
+                continue
+            town = _at_report_town(title) or _at_report_town(body[:400])
+            lat, lon = _at_geocode(town, state) if town else (None, None)
+            if lat is None:
+                lat, lon = fallback
+            units = sorted({tidy(u) for u in re.findall(r"\b(?:FF|BF|Feuerwehr)\s+[A-ZÄÖÜ][\wäöüß-]+(?:\s+(?:am|ob|im|an der)\s+[A-ZÄÖÜ][\wäöüß-]+)?", body)})
+            out.append({
+                "id": rowid("AT-" + prefix, date, time_, title),
+                "source": label, "region": region, "country": "AT",
+                "ref": f"{prefix}-{date[5:7]}{date[8:]}-{time_.replace(':', '')}",
+                "date": date, "time": time_, "category": cat, "title": title[:120],
+                "status": "closed",
+                "location": (town or label.split(" ·")[0].replace("BFKDO ", "").replace("BFK ", "").replace("FF ", "")) + f" ({state})",
+                "lat": lat, "lon": lon,
+                "units": ", ".join(units) or "—", "crew": None, "vehicles": len(units) or None,
+                "raw": body[:500], "link": tidy(it.findtext("link") or ""),
+            })
+        return out, status
+
+    return fetch_source
+
+
+_STMK_LFV = "https://www.lfv.steiermark.at/"
+_STMK_LIST_RE = re.compile(
+    r'(\d{2})\.(\d{2})\.(\d{4})(?:(?!\d{2}\.\d{2}\.\d{4}).){0,400}?<a[^>]+href="([^"]*read-\d+/?)"[^>]*>(.*?)</a>', re.S)
+
+
+def src_at_stmk_lfv():
+    """Styria's LFV "Einsätze / Berichte aus den Bereichen": the statewide list
+    of brigade reports, several a day, each with its own page whose meta
+    description carries the alarm time and town. Only pages not yet stored
+    are fetched (capped per cycle), so a poll costs a handful of requests."""
+    out = []
+    text, status = fetch(_STMK_LFV + "Home/Aktuelles/Einsaetze-Berichte.aspx")
+    if text is None:
+        return out, status
+    global _at_geocode_conn
+    if _at_geocode_conn is None:
+        _at_geocode_conn = db()
+    now = datetime.now(CEST)
+    cutoff = (now - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    fetched = 0
+    for dd, mo, yy, href, raw_title in _STMK_LIST_RE.findall(text):
+        title = tidy(strip_tags(raw_title))
+        date = f"{yy}-{mo}-{dd}"
+        if date < cutoff or not title:
+            continue
+        cat = _at_report_category(title)
+        if cat is None:
+            continue
+        link = _STMK_LFV + href.lstrip("/")
+        rid = rowid("AT-STMK", date, "", title)
+        known = _at_geocode_conn.execute("SELECT time, location, lat, lon, raw FROM incidents WHERE id=?", (rid,)).fetchone()
+        if known is not None:
+            time_, location, lat, lon, body = known["time"], known["location"], known["lat"], known["lon"], known["raw"]
+        else:
+            if fetched >= 10:
+                continue
+            fetched += 1
+            page, _ = fetch(link)
+            m = re.search(r'<div class="detailnews">(.*?)</div>', page or "", re.S)
+            body = tidy(strip_tags(re.sub(r"<h[12][^>]*>.*?</h[12]>|<p class=\"author\">.*?</p>", " ", m.group(1), flags=re.S))) if m else title
+            _d, time_ = _at_report_when(body, datetime(int(yy), int(mo), int(dd), 12, 0, tzinfo=CEST))
+            if not re.search(r"(?:um|gegen)\s+\d{1,2}[:.]\d{2}", body):
+                time_ = ""
+            town = _at_report_town(title) or _at_report_town(body)
+            lat, lon = _at_geocode(town, "Steiermark") if town else (None, None)
+            location = (town or "Steiermark") + " (Steiermark)"
+        out.append({
+            "id": rid, "source": "LFV Štajerska · poročila", "region": "stmk", "country": "AT",
+            "ref": f"STMK-LFV-{mo}{dd}", "date": date, "time": time_ or "",
+            "category": cat, "title": title[:120], "status": "closed",
+            "location": location, "lat": lat, "lon": lon,
+            "units": "—", "crew": None, "vehicles": None, "raw": (body or "")[:500], "link": link,
+        })
+    return out, status
+
+
 def place_label(text: str):
     scrubbed = UNIT_RE.sub(" ", text)
     for m in LOC_PHRASE.finditer(scrubbed):
@@ -1733,6 +1952,9 @@ SOURCES = [
     ("HAC · autoceste",   src_hac,           "HTML, national motorway network"),
     ("NÖ Feuerwehr · Wastl", src_at_noe,      "HTML, Lower Austria state dispatch"),
     ("OÖ Feuerwehr · LFV", src_at_ooe,        "HTML, Upper Austria state dispatch"),
+    ("LFV Štajerska · poročila", src_at_stmk_lfv, "HTML list + report pages, Styria"),
+    *[(label, make_at_feed(label, region, state, url, pfx, fb), "brigade report RSS")
+      for (label, region, state, url, pfx, fb) in AT_FEEDS],
     ("Meteoalarm",        src_meteoalarm,    "CAP 1.2 Atom feed"),
 ]
 

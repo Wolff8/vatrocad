@@ -287,11 +287,31 @@ EMS-adjacent calls in the fire logs — *Tragehilfe* (assist ambulance crew),
 *Hubschrauberlandeplatz* (secure a helicopter landing site), *Notarzt* — and the
 console tags those 🚑 / 🚁 so they stand out.
 
-**Styria** (`einsatzuebersicht.lfv.steiermark.at`) has a public overview too, but
-the host does not answer at all — TCP connect times out — from both the
-development sandbox and GitHub's US runners (checked with `probe.yml`). It is
-probably geo-fenced to Austrian/EU addresses. A parser is pointless until it
-can be polled from a runner; revisit with a self-hosted or EU runner.
+### The border belt: Styria and Carinthia
+
+Neither state has a reachable dispatch log. **Styria's** live overview
+(`einsatzuebersicht.lfv.steiermark.at`, which every district page merely
+iframes) does not answer at all — TCP connect times out — from the development
+sandbox, from GitHub's US runners (`probe.yml`) and from a third fetcher (503);
+it is evidently fenced to Austrian addresses. **Carinthia's** system
+(`feuerwehr.einsatz.or.at`) is login-only. What is open, and polled, are the
+after-action reports:
+
+| Source | Region | Feed |
+|---|---|---|
+| LFV Štajerska · poročila | `stmk` | `lfv.steiermark.at/Home/Aktuelles/Einsaetze-Berichte.aspx` — statewide daily list; each report page is fetched once (≤10 per poll) for the alarm time and town |
+| FF Mureck, FF Bad Radkersburg, FF Feldbach | `stmk` | brigade WordPress/Jimdo RSS |
+| BFKDO Klagenfurt-Land, Villach-Land, Wolfsberg, BFK Völkermarkt, FF Völkermarkt, FF Lavamünd | `ktn` | district-command and brigade WordPress RSS |
+
+These are reports, not calls: published hours to days later, a few per district
+per week. The alarm date/time is read from the text (*"Am 06.09.2026 um 09:29
+Uhr wurde … alarmiert"*, *"gegen 16:10 Uhr"*), the publication stamp is the
+fallback; the town from *"in Gosdorf"* / *"(Marktgemeinde Moosburg)"*, else the
+district seat. Non-incident posts (competitions, anniversaries, blessings) are
+filtered by keyword; exercises are kept and tagged. Because they are sparse and
+late, report rows live **7 days** (`AT_REPORT_MAX_AGE_DAYS`) instead of the
+3-day rule for the NÖ/OÖ dispatch rows; the console marks them 📰 and the
+"Ob meji SLO" filter shows just this belt.
 
 ## Why there's no API to call
 

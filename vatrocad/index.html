@@ -194,6 +194,7 @@ footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
 .at-row.fresh .att{color:#ff5e5e;font-weight:800;font-size:14px;letter-spacing:.005em}
 .at-row.fresh .at-t,.at-row.fresh .at-t b{color:#ff5e5e}
 .at-row.fresh .at-badge{color:var(--bad);border-color:var(--bad)}
+.at-badge.rep{color:var(--tx2);border-color:var(--tx3);margin-right:4px}
 .fresh-legend{color:var(--bad);font-weight:600}
 .at-kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px;margin-top:8px}
 .at-exp{margin-top:9px;padding:8px 10px;background:var(--panel3);border-left:3px solid var(--tx3);
@@ -265,10 +266,14 @@ footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
 
 <div class="pane at-pane" id="atPane">
   <h3><span>🇦🇹 Avstrija · gasilske intervencije v živo</span><span class="at-counters mono" id="atCounters"></span></h3>
-  <div class="at-sub">Spodnja in Zgornja Avstrija · uradni dispečerski sistemi deželnih gasilskih zvez (Wastl NÖ, LFV OÖ) ·
+  <div class="at-sub">Spodnja in Zgornja Avstrija: uradni dispečerski sistemi v živo (Wastl NÖ, LFV OÖ) · Štajerska in Koroška ob slovenski meji: poročila
+    okrožnih poveljstev in gasilskih enot (📰, objavljena naknadno, z uro alarma iz poročila, hranjena 7 dni) ·
     osveženo vsakih 15 min · <span class="fresh-legend">rdeče = dojava mlajša od 1 ure</span> · klik na vrstico ali oznako na zemljevidu odpre podrobnosti v slovenščini</div>
   <div class="filters" id="atFilters">
     <button class="f" data-at="all" aria-pressed="true">Vse dežele</button>
+    <button class="f" data-at="border" aria-pressed="false">🇸🇮 Ob meji SLO</button>
+    <button class="f" data-at="stmk" aria-pressed="false">Štajerska</button>
+    <button class="f" data-at="ktn" aria-pressed="false">Koroška</button>
     <button class="f" data-at="ooe" aria-pressed="false">Zgornja Avstrija (OÖ)</button>
     <button class="f" data-at="noe" aria-pressed="false">Spodnja Avstrija (NÖ)</button>
     <span style="width:10px"></span>
@@ -284,7 +289,7 @@ footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
   </div>
   <div class="legend">
     <span>🔥 Požar</span><span>🔧 Tehnično</span><span>🚧 Prometna nesreča</span><span>🆘 Reševanje oseb/živali</span>
-    <span>🚑 NMP · 🚁 helikopter</span><span>📋 Drugo</span><span>🎓 Vaja</span>
+    <span>🚑 NMP · 🚁 helikopter</span><span>📋 Drugo</span><span>🎓 Vaja</span><span>📰 poročilo enote (Štajerska/Koroška)</span>
     <span class="fresh-legend">🆕 mlajše od 1 ure</span>
   </div>
 </div>
@@ -309,6 +314,7 @@ footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
 const SB_URL = "https://ofzwkanpjhdvlygrhbum.supabase.co";
 const SB_KEY = "sb_publishable_l3UZaMzvgu_8nknqN-xB7g_VZauptFm";
 const LIVE_HOURS = 12, MAX_AGE_DAYS = 3;
+const AT_REPORT_DAYS = 7;   // Styria/Carinthia report rows live a week server-side (see vatrocad.py)
 
 // Category colors as real hex — Leaflet paints its own canvas, so it can't read
 // the CSS custom properties above. Keep this in sync with :root by eye; both are
@@ -322,7 +328,10 @@ const SN={active:"Aktivan · na terenu",contained:"Lokaliziran",closed:"Ugašen 
 const AT_ICON={fire:"🔥",tech:"🔧",accident:"🚧",rescue:"🆘",ems:"🚑",other:"📋",exercise:"🎓"};
 const AT_CAT_SL={fire:"Požar",tech:"Tehnično reševanje",accident:"Prometna nesreča",
   rescue:"Reševanje oseb/živali",ems:"Nujna medicinska pomoč",other:"Drugo",exercise:"Vaja"};
-const AT_STATE_SL={ooe:"Zgornja Avstrija",noe:"Spodnja Avstrija"};
+const AT_STATE_SL={ooe:"Zgornja Avstrija",noe:"Spodnja Avstrija",stmk:"Štajerska",ktn:"Koroška"};
+const AT_BORDER=new Set(["stmk","ktn"]);           // states on the Slovenian border
+// Report-based rows (Styria/Carinthia) versus live dispatch rows (NÖ/OÖ).
+const isReport=i=>!/^(NOE|OOE)-/.test(i.ref||"");
 const AT_STATUS_SL={active:"AKTIVNO",closed:"ZAKLJUČENO",contained:"LOKALIZIRANO",unknown:"—"};
 // The Austrian alarm-code scheme as NÖ's dispatch uses it: a letter for the
 // kind of call, a digit for its scale ("Alarmstufe"). OÖ uses plain
@@ -335,14 +344,15 @@ const AT_LEVEL_SL={0:"stopnja 0 — brez nevarnosti, rutinska ali podporna nalog
   2:"stopnja 2 — srednji obseg, več enot, ogrožene osebe",
   3:"stopnja 3 — večji obseg, enote iz sosednjih krajev",
   4:"stopnja 4 — velik dogodek, številne enote z območja"};
-const atExplain=raw=>{const m=/^(SOF|[BTSU])(\d)\b/.exec(raw||"");
+const atExplain=(raw,i)=>{const m=/^(SOF|[BTSU])(\d)\b/.exec(raw||"");
+  if(!m&&i&&isReport(i)) return "Poročilo gasilske enote (objavljeno naknadno) — brez dispečerske kode; datum in ura sta čas alarma iz besedila poročila, sicer čas objave.";
   if(!m) return "Opisni naziv brez alarmne kode (Zgornja Avstrija kod ne uporablja).";
   return `${AT_KIND_SL[m[1]]||m[1]} · ${AT_LEVEL_SL[m[2]]||("stopnja "+m[2])}`;};
 const isHeli=i=>/Hubschrauber|Landeplatz|Notarzt/i.test(i.raw||"");
 const ageSl=i=>{const h=Math.max(0,Math.round(ageMs(i)/36e5));
   return h<1?"pravkar":h<24?`pred ${h} h`:`pred ${Math.round(h/24)} d`;};
 let DATA={incidents:[],context:[],sources:[],austria:[]}, F={cat:"all",reg:"all",win:"live"}, sel=null;
-let atFilter="all", atShowEx=true, atOnlyActive=false, atSel=null;   // Austria view state
+let atFilter="all", atShowEx=true, atOnlyActive=false, atSel=null, atRefit=false;   // Austria view state
 // ROWS is the single source of truth: raw DB rows keyed by id. REST fills it on
 // load; realtime patches it row-by-row. rebuild() derives everything from it.
 const ROWS=new Map();
@@ -499,7 +509,7 @@ function draw(){
 // are state, "only active", and whether training exercises are shown.
 // Calls under an hour old are flagged red so they can't be missed. ──
 function atVis(){
-  return DATA.austria.filter(i=>(atFilter==="all"||i.region===atFilter)
+  return DATA.austria.filter(i=>(atFilter==="all"||i.region===atFilter||(atFilter==="border"&&AT_BORDER.has(i.region)))
       && (atShowEx||i.category!=="exercise") && (!atOnlyActive||i.status==="active"))
     .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time));
 }
@@ -518,7 +528,7 @@ function drawAustria(){
       <div class="at-icon">${atIcon(i)}</div>
       <div class="at-t mono"><b>${esc(i.date.slice(8))}.${esc(i.date.slice(5,7))}.</b>${esc(i.time||"—")}<span style="display:block">${fresh?"🆕 ":""}${ageSl(i)}</span></div>
       <div class="at-body">
-        <div class="att">${esc(i.title)} ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}">${AT_STATUS_SL[i.status]||esc(i.status)}</span>`:""}</div>
+        <div class="att">${isReport(i)?`<span class="at-badge rep">📰 ${esc(AT_CAT_SL[i.category]||i.category)}</span> `:""}${esc(i.title)} ${i.status&&i.status!=="unknown"&&!isReport(i)?`<span class="pill ${i.status}">${AT_STATUS_SL[i.status]||esc(i.status)}</span>`:""}</div>
         <div class="atl">${esc(i.location||"")} · <span class="at-badge">${esc(AT_STATE_SL[i.region]||i.region)}</span></div>
         <div class="atu">${esc(i.units||"")}${i.raw?" · "+esc(i.raw):""}</div>
       </div>
@@ -553,7 +563,7 @@ function atRenderMap(v){
     m.on("click",()=>atPick(i.id,{fly:false}));
     m.addTo(atMarkerLayer); atMarkersById.set(i.id,m); bounds.push([i.lat,i.lon]);
   }
-  if(!atMapInited && bounds.length){ atMap.fitBounds(bounds,{padding:[24,24],maxZoom:9}); atMapInited=true; }
+  if((!atMapInited||atRefit) && bounds.length){ atMap.fitBounds(bounds,{padding:[24,24],maxZoom:9}); atMapInited=true; atRefit=false; }
 }
 
 function atDetail(i){
@@ -571,13 +581,14 @@ function atDetail(i){
       <div><div class="dl">Zvezna dežela</div><div class="dv">${esc(AT_STATE_SL[i.region]||i.region)}</div></div>
       <div><div class="dl">Datum dojave</div><div class="dv">${esc(i.date)}</div></div>
       <div><div class="dl">Ura dojave</div><div class="dv">${esc(i.time||"—")} · ${ageSl(i)}</div></div>
-      <div><div class="dl">Stanje</div><div class="dv">${AT_STATUS_SL[i.status]||"—"}</div></div>
+      <div><div class="dl">Stanje</div><div class="dv">${isReport(i)?"ZAKLJUČENO (poročilo)":(AT_STATUS_SL[i.status]||"—")}</div></div>
+      <div><div class="dl">Vrsta vira</div><div class="dv">${isReport(i)?"📰 poročilo enote":"📡 dispečerski dnevnik v živo"}</div></div>
       <div><div class="dl">Št. enot</div><div class="dv">${i.vehicles??(i.units?i.units.split(",").length:"—")}</div></div>
       <div><div class="dl">Referenca</div><div class="dv">${esc(i.ref||"—")}</div></div>
       <div><div class="dl">Vir</div><div class="dv">${esc(i.source)}</div></div>
     </div>
-    <div class="at-exp"><b>Koda in stopnja:</b> ${esc(atExplain(i.raw))}<br>
-      <b>Izvirni nemški zapis:</b> ${esc(i.raw||"—")}<br>
+    <div class="at-exp"><b>Koda in stopnja:</b> ${esc(atExplain(i.raw,i))}<br>
+      <b>${isReport(i)?"Izvleček poročila (nemško)":"Izvirni nemški zapis"}:</b> ${esc(i.raw||"—")}<br>
       <b>Vrsta:</b> ${esc(AT_CAT_SL[i.category]||i.category)}${isHeli(i)?" · 🚁 v besedilu je omenjen helikopter / zdravnik NMP":""}</div>
     <div class="dn"><b>Alarmirane enote:</b> ${esc(i.units||"—")}<br>
       ${i.link?`<b>Uradna stran:</b> <a href="${esc(i.link)}" target="_blank" rel="noopener">odpri vir</a>`:""}</div>`;
@@ -602,7 +613,7 @@ $("atList").addEventListener("keydown",e=>{const r=e.target.closest(".at-row");
 $("atFilters").addEventListener("click",e=>{
   const b=e.target.closest(".f"); if(!b) return;
   if(b.dataset.at){
-    atFilter=b.dataset.at;
+    atFilter=b.dataset.at; atRefit=true;          // re-frame the map on the chosen state
     document.querySelectorAll('#atFilters .f[data-at]').forEach(o=>o.setAttribute("aria-pressed",String(o===b)));
   }else if(b.dataset.attog==="active"){ atOnlyActive=!atOnlyActive; b.setAttribute("aria-pressed",String(atOnlyActive)); }
   else if(b.dataset.attog==="ex"){ atShowEx=!atShowEx; b.setAttribute("aria-pressed",String(atShowEx)); }
@@ -744,7 +755,7 @@ async function load(){
     // archive grows over weeks of 15-minute polls instead of re-downloading it
     // in full every load. A one-day buffer past MAX_AGE_DAYS covers timezone
     // rounding at the edge of the window.
-    const cutoffDate=new Date(Date.now()-(MAX_AGE_DAYS+1)*864e5).toISOString().slice(0,10);
+    const cutoffDate=new Date(Date.now()-(AT_REPORT_DAYS+1)*864e5).toISOString().slice(0,10);
     const url=`${SB_URL}/rest/v1/incidents?select=*&order=ts.desc.nullslast&limit=2000&occurred=gte.${cutoffDate}`;
     const r=await fetch(url,{headers:{apikey:SB_KEY,Authorization:`Bearer ${SB_KEY}`},cache:"no-store"});
     if(!r.ok) throw new Error("HTTP "+r.status);
