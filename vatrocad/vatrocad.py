@@ -590,9 +590,16 @@ CATEGORY_RULES = [
     # Police-reported casualty events. Traffic accidents with injuries are the
     # single largest driver of EMS call-outs, so they belong in a fire+hitna view,
     # but they get their own category so they never masquerade as brigade calls.
-    ("accident", ("prometna nesreća", "prometne nesreće", "prometnoj nesreći", "poginu",
-                  "smrtno stradal", "teško ozlijeđ", "tesko ozlijed", "lakše ozlijeđ",
-                  "nastradal", "utopi", "eksplozij", "pad s visine", "ozlijeđen")),
+    ("accident", ("prometna nesreća", "prometne nesreće", "prometnoj nesreći", "prometnu nesreću",
+                  "prometnih nesreća", "poginu", "smrtno stradal", "teško ozlijeđ", "tesko ozlijed",
+                  "lakše ozlijeđ", "nastradal", "utopi", "eksplozij", "pad s visine", "ozlijeđen",
+                  # declined/colloquial crash phrasing police headlines actually use
+                  "udario u", "udarila u", "udar u ", "naletio", "naletjel", "sletio", "sletjel",
+                  "slijetanj", "prevrnu", "sudar", "skrivio nesreću", "skrivila nesreću",
+                  "pod kotač", "pregaz", "srušio se", "pao s ")),
+    # Search-and-rescue and body finds: police report them, no one else does.
+    ("rescue", ("nestala osoba", "nestalog", "nestale", "potrag", "spašen", "spasili", "spašavanj",
+                "spasavanj", "pronađeno tijelo", "pronađen mrtav", "pronađena mrtva", "beživotno")),
     ("ems",   ("asistencij", "hmp", "hitne medicinske", "bolesne osobe", "sanitetsk")),
     ("fire",  ("požar", "pozar", "vatrodojav", "užaren", "uzaren", "dim ", "gorenj", "zapalj")),
     ("tech",  ("tehnič", "tehnic", "ispumpav", "crpljen", "saniranj", "krovišt", "prometn nesrec",
@@ -909,9 +916,13 @@ def src_police():
         for href, title_html, excerpt_html, dd, mm, yy in NEWS_ITEM.findall(listing):
             title = tidy(strip_tags(title_html))
             low = title.lower()
-            if any(k in low for k in POLICE_SKIP):
+            tcat = categorise(title, title)
+            # PR/enforcement headlines are dropped — unless the headline is itself
+            # a crash or a rescue ("s 2,31 promila skrivio nesreću", "akcija
+            # potrage"): the skip word is then incidental to a real call-out.
+            if any(k in low for k in POLICE_SKIP) and tcat not in ("accident", "fire", "rescue"):
                 continue
-            if categorise(title, title) not in ("accident", "fire", "summary"):
+            if tcat not in ("accident", "fire", "rescue", "summary"):
                 continue
             published = f"{yy}-{mm}-{dd}"
             if published < cutoff:
@@ -1075,7 +1086,7 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
             if any(k in blob.lower() for k in CRIME_SKIP):
                 continue
             cat = categorise(body, title)
-            if cat not in ("fire", "accident", "tech", "ems"):
+            if cat not in ("fire", "accident", "tech", "ems", "rescue"):
                 continue
             pub = it.findtext("pubDate") or ""
             try:
