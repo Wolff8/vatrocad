@@ -145,6 +145,33 @@ button.rf:disabled{opacity:.5;cursor:wait}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .legend i{width:9px;height:9px;border-radius:1px}
 footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
+/* Austria: deliberately no map, just a live feed — see index.html header
+   comment. Its own list style, separate from the Croatian .row rows, so the
+   "younger than 1h" red+bold treatment reads as a distinct alert state
+   rather than reusing the Croatian "live" green. */
+#atPane{margin-top:0}
+.at-list{max-height:520px;overflow-y:auto}
+.at-row{display:grid;grid-template-columns:26px 70px 1fr auto;gap:10px;align-items:start;
+  padding:9px 12px;border-bottom:1px solid var(--line)}
+.at-row:last-child{border-bottom:none}
+.at-icon{font-size:17px;line-height:1.3;text-align:center}
+.at-t{font-size:10px;color:var(--tx3);line-height:1.35}
+.at-t b{display:block;color:var(--tx2);font-weight:500}
+.at-body .att{font-size:12px;font-weight:500;line-height:1.4}
+.at-body .atl{font-size:10.5px;color:var(--tx2);margin-top:1px}
+.at-body .atu{font-size:9.5px;color:var(--tx3);margin-top:2px;font-family:"IBM Plex Mono",monospace}
+.at-badge{font-size:9px;letter-spacing:.09em;text-transform:uppercase;color:var(--tx3);
+  padding:2px 6px;border:1px solid var(--line2);border-radius:2px;white-space:nowrap}
+/* The freshness alert: red, bold, a slightly larger/heavier font so a viewer
+   catches it without reading every row — a genuinely different visual state,
+   not just a color tweak on the normal row. */
+.at-row.fresh{background:color-mix(in srgb,var(--bad) 8%,transparent);
+  border-left:3px solid var(--bad)}
+.at-row.fresh .att{color:var(--bad);font-weight:700;font-size:12.5px}
+.at-row.fresh .at-t{color:var(--bad)}
+.at-row.fresh .at-t b{color:var(--bad)}
+.at-row.fresh .at-badge{color:var(--bad);border-color:var(--bad)}
+.fresh-legend{color:var(--bad);font-weight:600}
 </style>
 </head>
 <body>
@@ -208,6 +235,20 @@ footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
   </div>
 </div>
 
+<div class="pane" id="atPane">
+  <h3><span>🇦🇹 Avstrija · Gasilske intervencije v živo</span><span id="atShown" class="mono"></span></h3>
+  <div class="filters">
+    <button class="f" data-at="all" aria-pressed="true">Vse</button>
+    <button class="f" data-at="ooe" aria-pressed="false">Zgornja Avstrija (OÖ)</button>
+    <button class="f" data-at="noe" aria-pressed="false">Spodnja Avstrija (NÖ)</button>
+  </div>
+  <div class="at-list" id="atList"></div>
+  <div class="legend">
+    <span>🔥 Požar</span><span>🔧 Tehnično reševanje</span><span>🚧 Prometna nesreča</span>
+    <span>📋 Drugo</span><span class="fresh-legend">🆕 mlajše od 1 ure</span>
+  </div>
+</div>
+
 <div class="srcbar" id="srcbar"></div>
 <footer id="foot"></footer>
 </div>
@@ -237,7 +278,12 @@ const CATCOLOR={fire:"#ff6a35",tech:"#4d9de0",ems:"#b478ec",accident:"#ffd23f",
 const CN={fire:"Požar",tech:"Tehnička",ems:"Asistencija HMP",accident:"Nesreća",rescue:"Spašavanje HGSS",other:"Ostalo",
           weather:"Upozorenje",summary:"Sažetak"};
 const SN={active:"Aktivan · na terenu",contained:"Lokaliziran",closed:"Ugašen · završen",unknown:"—"};
-let DATA={incidents:[],context:[],sources:[]}, F={cat:"all",reg:"all",win:"live"}, sel=null;
+// Austria feed: icon + Slovenian category label per incident category.
+const AT_ICON={fire:"🔥",tech:"🔧",accident:"🚧",other:"📋"};
+const AT_CAT_SL={fire:"Požar",tech:"Tehnično reševanje",accident:"Prometna nesreča",other:"Drugo"};
+const AT_STATE_SL={ooe:"Zgornja Avstrija",noe:"Spodnja Avstrija"};
+let DATA={incidents:[],context:[],sources:[],austria:[]}, F={cat:"all",reg:"all",win:"live"}, sel=null;
+let atFilter="all";   // all | ooe | noe
 // ROWS is the single source of truth: raw DB rows keyed by id. REST fills it on
 // load; realtime patches it row-by-row. rebuild() derives everything from it.
 const ROWS=new Map();
@@ -260,6 +306,7 @@ function ageLabel(i){
   return h<1?"just now":h<24?`${h}h ago`:`${Math.round(h/24)}d ago`;
 }
 const isActive=i=>i.status==="active"||i.status==="contained";
+const isVeryFresh=i=>ageMs(i)<=1*36e5;   // Austria's "younger than 1h" red alert state
 
 function vis(){
   return DATA.incidents.filter(i =>
@@ -380,6 +427,36 @@ function draw(){
   kpis(); activeStrip();
 }
 
+// Austria: a live feed only — no map, no window toggle (the server already
+// deletes anything past AT_MAX_AGE_DAYS, so there is nothing to hide here
+// that isn't already gone). Just the state filter and the row list, with
+// calls under an hour old flagged red so they can't be missed.
+function drawAustria(){
+  const v=DATA.austria.filter(i=>atFilter==="all"||i.region===atFilter)
+    .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time));
+  $("atShown").textContent=v.length+" prikazano";
+  $("atList").innerHTML = v.length ? v.map(i=>{
+    const fresh=isVeryFresh(i);
+    return `<div class="at-row ${fresh?"fresh":""}">
+      <div class="at-icon">${AT_ICON[i.category]||"⚠️"}</div>
+      <div class="at-t mono"><b>${esc(i.date.slice(8))}.${esc(i.date.slice(5,7))}.</b>${esc(i.time||"—")}<span style="display:block">${fresh?"🆕 ":""}${ageLabel(i)}</span></div>
+      <div class="at-body">
+        <div class="att">${esc(i.title)}</div>
+        <div class="atl">${esc(i.location||"")} · <span class="at-badge">${esc(AT_STATE_SL[i.region]||i.region)}</span></div>
+        <div class="atu">${esc(i.units||"")}${i.raw?" · "+esc(i.raw):""}</div>
+      </div>
+    </div>`;
+  }).join("")
+    : `<div style="padding:26px;text-align:center;color:var(--tx3)">Trenutno ni intervencij v tem filtru.</div>`;
+}
+document.querySelectorAll('#atPane .filters .f').forEach(b=>{
+  b.addEventListener("click",()=>{
+    atFilter=b.dataset.at;
+    document.querySelectorAll('#atPane .filters .f').forEach(o=>o.setAttribute("aria-pressed",String(o===b)));
+    drawAustria();
+  });
+});
+
 function detail(i){
   const d=$("detail");
   if(!i){ d.innerHTML=`<div style="color:var(--tx3);font-size:12px;padding-top:30px;text-align:center">
@@ -437,7 +514,8 @@ $("filters").addEventListener("click",e=>{
 
 // Map one Supabase row (DB column names) onto the shape the console renders.
 function mapRow(r){
-  return {id:r.id,source:r.source,region:r.region,ref:r.ref,date:r.occurred,time:r.occurred_time,
+  return {id:r.id,source:r.source,region:r.region,country:r.country||"HR",ref:r.ref,
+    date:r.occurred,time:r.occurred_time,
     category:r.category,status:r.status||"unknown",title:r.title,location:r.location,
     lat:r.lat,lon:r.lon,units:r.units,crew:r.crew,vehicles:r.vehicles,raw:r.raw,link:r.link,
     first_seen:r.first_seen,last_seen:r.last_seen};
@@ -488,13 +566,20 @@ function rebuild(){
   // DATA.incidents — the header's incident/source counts used to read the raw
   // unfiltered total and silently grow past the promised 3-day cap forever as
   // the archive accumulates.
-  DATA.incidents=all.filter(i=>i.category!=="summary" && i.category!=="weather"
+  // country="HR" (or missing, for rows from before the country column existed)
+  // drives the Croatian map/log/KPIs; country="AT" is a wholly separate,
+  // map-less feed below — never mix the two into one count or one list.
+  DATA.incidents=all.filter(i=>(i.country||"HR")==="HR" && i.category!=="summary" && i.category!=="weather"
     && (!i.date || tsOf(i.date,i.time)<=cutoff) && isRecent(i));
-  DATA.context  =all.filter(i=>i.category==="summary"||i.category==="weather");
+  DATA.context  =all.filter(i=>(i.country||"HR")==="HR" && (i.category==="summary"||i.category==="weather"));
+  // Austria's own retention is enforced server-side (rows past AT_MAX_AGE_DAYS
+  // are actually deleted, not just hidden), so everything returned here is
+  // already in-window — no extra client-side age filter needed.
+  DATA.austria  =all.filter(i=>i.country==="AT");
   const live=DATA.incidents.filter(isLive).length;
   const act =DATA.incidents.filter(i=>isActive(i)&&isRecent(i)).length;
   $("scope").textContent=`${live} live · ${act} active · ${DATA.incidents.length} in last ${MAX_AGE_DAYS}d · ${new Set(DATA.incidents.map(i=>i.source)).size} sources`;
-  srcTiers(); draw();
+  srcTiers(); draw(); drawAustria();
   if(sel) detail([...DATA.incidents,...DATA.context].find(i=>i.id===sel));
   syncHeader();
 }
