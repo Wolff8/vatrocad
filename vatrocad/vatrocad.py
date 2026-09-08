@@ -217,6 +217,52 @@ def to_ts(date: str, time_: str):
         return None
 
 
+def event_when(pub_date: str, pub_time: str, body_time: str):
+    """Pair a call time named *inside* a report with the right calendar day.
+
+    These sources publish after the fact: the ŽVOC morning bulletin (08.09,
+    07:00) reports last night's 22:20 call, and a newsroom piece filed at 08:15
+    names an hour from the small hours. Taking the publication date together
+    with the body's hour therefore dates the event in the future, where the
+    console rightly refuses to show it — which is how "all of Croatia" can look
+    frozen for hours while fresh rows sit in the table, unshowable.
+
+    A report cannot describe something that has not happened yet, so a body time
+    later than the publication time belongs to the previous day."""
+    if not body_time:
+        return pub_date, pub_time
+    if pub_time and body_time > pub_time:
+        try:
+            d = datetime.strptime(pub_date, "%Y-%m-%d") - timedelta(days=1)
+            return d.strftime("%Y-%m-%d"), body_time
+        except ValueError:
+            pass
+    return pub_date, body_time
+
+
+def defuture(rows) -> int:
+    """Last-resort dating guard, applied to every source. An *incident* stamped
+    in the future is a parse bug, never a live call, and the dashboard hides it —
+    so fix it here instead of silently losing the row. Weather warnings are
+    legitimately future-dated and are left alone."""
+    now = datetime.now(CEST)
+    fixed = 0
+    for r in rows:
+        if r.get("category") == "weather":
+            continue
+        ts = to_ts(r.get("date", ""), r.get("time", ""))
+        if not ts:
+            continue
+        if datetime.fromisoformat(ts) > now + timedelta(minutes=5):
+            try:
+                r["date"] = (datetime.strptime(r["date"], "%Y-%m-%d")
+                             - timedelta(days=1)).strftime("%Y-%m-%d")
+                fixed += 1
+            except (ValueError, KeyError):
+                pass
+    return fixed
+
+
 def push_supabase(rows):
     """Upsert parsed incidents into Supabase via the PostgREST endpoint. Idempotent
     (merge on id), so pushing every cycle's full parse is self-healing. No-op when
@@ -964,10 +1010,11 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
             except ValueError:
                 continue
             date, t = dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
-            # An hour named inside the story beats the publication hour.
+            # An hour named inside the story beats the publication hour — but a
+            # piece filed at 08:15 that names 21:40 is reporting last night.
             tm = re.search(r"\b(?:oko|u)\s+(\d{1,2})[:.](\d{2})\s*(?:sati|h\b)", body)
             if tm:
-                t = f"{int(tm.group(1)):02d}:{tm.group(2)}"
+                date, t = event_when(date, t, f"{int(tm.group(1)):02d}:{tm.group(2)}")
             lead = re.match(r"^([A-ZŠĐČĆŽ][A-ZŠĐČĆŽ\s]{2,28}?)\s+[A-ZŠĐČĆŽ][a-zšđčćž]",
                             title) if caps_lead else None
             lat, lon = geocode((lead.group(1) + " " if lead else "") + blob)
@@ -1144,7 +1191,9 @@ def src_sibenik_in():
         # The bulletin text usually names the call time; prefer it over the byline.
         tm = re.search(r"(?:dojav[ae]\s+(?:je\s+)?zaprimljena\s+u|u)\s+(\d{1,2})[:.](\d{2})\s*(?:h|sati)",
                        body)
-        t = f"{int(tm.group(1)):02d}:{tm.group(2)}" if tm else f"{int(hh):02d}:{mi}"
+        pub_t = f"{int(hh):02d}:{mi}"
+        date, t = (event_when(date, pub_t, f"{int(tm.group(1)):02d}:{tm.group(2)}")
+                   if tm else (date, pub_t))
         lat, lon = geocode(blob)
         if lat is None:
             lat, lon = PLACES["šibenik"]
@@ -1230,12 +1279,16 @@ def src_zvoc_sibenik():
             veh = re.search(r"(\d+)\s+vozil", item)
             units = sorted({tidy(u) for u in UNIT_RE.findall(item)})
             lat, lon = geocode(item)
-            it = hhmm(tm.group(1)) if tm else t
+            # The bulletin's own stamp is the publication moment; an item hour
+            # after it happened the evening before. Keep the id keyed to the
+            # bulletin date so an already-stored row is corrected, not doubled.
+            idate, it = (event_when(f"{yr}-{mon}-{day}", t, hhmm(tm.group(1)))
+                         if tm else (f"{yr}-{mon}-{day}", t))
             out.append({
                 "id": rowid("ŽVOC Šibenik-Knin", f"{yr}-{mon}-{day}", it, item),
                 "source": "ŽVOC Šibenik-Knin", "region": "sib",
                 "ref": f"ŽV-{day}{mon}-{j+1}",
-                "date": f"{yr}-{mon}-{day}", "time": it,
+                "date": idate, "time": it,
                 "category": categorise(item), "title": summarise(item),
                 "location": place_label(item) or "Šibenik-Knin", "lat": lat, "lon": lon,
                 "units": ", ".join(units), "crew": int(crew.group(1)) if crew else None,
@@ -2167,6 +2220,7 @@ def poll_once(conn, verbose=True):
             rows, status = fn()
         except Exception as e:                                # noqa: BLE001
             rows, status = [], f"error: {type(e).__name__}"
+        refuted = defuture(rows) if rows else 0
         new = store(conn, rows) if rows else 0
         total_new += new
         if rows:
@@ -2185,7 +2239,8 @@ def poll_once(conn, verbose=True):
                  datetime.now(timezone.utc).isoformat(timespec="seconds")))
         if verbose:
             print(f"  {name:22s} {status:12s} {len(rows):3d} parsed, "
-                  f"{new:3d} new  ({time.time()-t0:.1f}s)")
+                  f"{new:3d} new  ({time.time()-t0:.1f}s)"
+                  + (f"  [{refuted} redated]" if refuted else ""))
     # The police source fans out over twenty administrations under one name; record
     # each PU as its own source row so the dashboard can show per-county freshness.
     with conn:
