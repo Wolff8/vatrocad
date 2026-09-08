@@ -88,8 +88,17 @@ def push_supabase(rows):
     if not (SUPABASE_URL and SUPABASE_KEY and rows):
         return "off" if not (SUPABASE_URL and SUPABASE_KEY) else "0"
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    payload = []
+    # PostgREST turns one POST into a single INSERT ... ON CONFLICT DO UPDATE, and
+    # Postgres refuses to touch the same conflict target twice in one statement
+    # (error 21000) — so if two parsed rows in this cycle share an id (an
+    # overlapping paginated source, or two sources hashing to the same id), the
+    # WHOLE batch is rejected and nothing is written, silently. Dedup by id first
+    # (last one wins) so one collision can never take the rest of the poll down.
+    by_id = {}
     for r in rows:
+        by_id[r["id"]] = r
+    payload = []
+    for r in by_id.values():
         blob = f"{r.get('title', '')} {r.get('raw', '')}"
         payload.append({
             "id": r["id"], "source": r["source"], "region": r.get("region"),
@@ -109,9 +118,10 @@ def push_supabase(rows):
                  "Prefer": "resolution=merge-duplicates,return=minimal"})
     try:
         with urllib.request.urlopen(req, timeout=45) as resp:
-            return f"pushed {len(payload)} ({resp.status})"
+            dupes = len(rows) - len(payload)
+            return f"pushed {len(payload)} ({resp.status})" + (f", {dupes} in-batch dupes dropped" if dupes else "")
     except urllib.error.HTTPError as e:
-        return f"error: HTTP {e.code} {e.read()[:120].decode('utf-8', 'replace')}"
+        return f"error: HTTP {e.code} {e.read()[:400].decode('utf-8', 'replace')}"
     except Exception as e:                                        # noqa: BLE001
         return f"error: {type(e).__name__}"
 
