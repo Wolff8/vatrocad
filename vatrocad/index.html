@@ -10,6 +10,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" media="print" onload="this.media='all'"
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;650&display=swap">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <style>
 :root{
   color-scheme:dark;
@@ -58,6 +60,8 @@ button.rf:disabled{opacity:.5;cursor:wait}
 .active-strip>h3 i{width:8px;height:8px;border-radius:50%;background:var(--active);
   box-shadow:0 0 8px var(--active);animation:pulse 1.4s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes flashHi{0%{box-shadow:inset 0 0 0 999px color-mix(in srgb,var(--warn) 16%,transparent)}
+  100%{box-shadow:inset 0 0 0 999px transparent}}
 .acards{display:flex;gap:8px;overflow-x:auto;padding:9px}
 .acard{flex:0 0 auto;min-width:210px;max-width:260px;background:var(--panel2);border:1px solid var(--line2);
   border-left:3px solid var(--active);border-radius:3px;padding:8px 10px;cursor:pointer}
@@ -99,15 +103,28 @@ button.rf:disabled{opacity:.5;cursor:wait}
 .rsq{font-size:9.5px;color:var(--tx3);padding:1px 6px;border:1px solid var(--line2);
   border-radius:2px;white-space:nowrap;margin-right:10px}
 .mapwrap{padding:6px}
-svg.map{display:block;width:100%;height:auto}
-.coast{fill:#0e161d;stroke:#2b3b48;stroke-width:1.6;stroke-linejoin:round}
-.reflab{fill:#4f6373;font-size:11px;font-family:"IBM Plex Mono",monospace}
-.mk{cursor:pointer}
-.mk circle.hit{fill:transparent}
-.mk circle.dot{stroke:#080b0e;stroke-width:1.2}
-.mk.act circle.dot{animation:pulse 1.4s ease-in-out infinite}
-.mk.sel circle.dot{stroke:var(--warn);stroke-width:2.4}
-.detail{padding:11px 13px;border-top:1px solid var(--line);background:var(--panel2);min-height:132px}
+/* Real Leaflet map, dark basemap. Leaflet paints its own canvas/tiles, so this
+   just reserves the box and re-skins Leaflet's chrome (zoom buttons, popups,
+   attribution) to match the console instead of its default light styling. */
+#leafletMap{height:460px;border-radius:2px;background:var(--bg)}
+.leaflet-container{background:var(--bg);font-family:"IBM Plex Sans",sans-serif}
+.leaflet-control-zoom a{background:var(--panel2)!important;color:var(--tx)!important;
+  border-color:var(--line2)!important}
+.leaflet-control-zoom a:hover{background:var(--panel3)!important}
+.leaflet-control-attribution{background:rgba(8,11,14,.72)!important;color:var(--tx3)!important;
+  font-size:9.5px!important}
+.leaflet-control-attribution a{color:var(--tx2)!important}
+.leaflet-popup-content-wrapper{background:var(--panel2);color:var(--tx);border-radius:3px;
+  box-shadow:0 4px 18px rgba(0,0,0,.5)}
+.leaflet-popup-tip{background:var(--panel2)}
+.leaflet-popup-close-button{color:var(--tx3)!important}
+.mpop .bdg{margin-bottom:4px}
+.mpop .pt{font-size:12.5px;font-weight:600;line-height:1.35;margin-bottom:4px}
+.mpop .pm{font-size:10.5px;color:var(--tx2);font-family:"IBM Plex Mono",monospace}
+.mk-active{animation:pulse 1.4s ease-in-out infinite}
+.detail{padding:11px 13px;border-top:1px solid var(--line);background:var(--panel2);min-height:132px;
+  scroll-margin-top:12px}
+.detail.flash{animation:flashHi 1s ease-out}
 .dh{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;margin-bottom:6px}
 .bdg{font:600 9.5px/1 "IBM Plex Mono",monospace;letter-spacing:.1em;text-transform:uppercase;padding:3px 7px;border-radius:2px}
 .dt{font-size:14px;font-weight:600}
@@ -183,19 +200,9 @@ footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
   </div>
 
   <div class="pane">
-    <h3><span>Geo plot · Croatia</span><span class="mono">WGS84 → equirect</span></h3>
+    <h3><span>Live map · Croatia</span><span class="mono">tap a marker or a row</span></h3>
     <div class="mapwrap">
-      <svg class="map" viewBox="0 0 645 642" role="img" aria-label="Interventions plotted on a map of Croatia">
-        <path class="coast" d="M18.7,170.8 L52.0,153.3 L119.6,150.4 L171.6,169.4 L202.8,135.8 L241.3,112.4 L280.8,74.5 L314.1,36.5 L334.9,19.0 L379.6,39.4 L436.8,102.2 L499.2,127.0 L572.0,115.3 L626.1,211.7 L582.4,221.9 L520.0,229.2 L462.8,233.6 L395.2,217.5 L332.8,238.0 L286.0,255.5 L280.8,311.0 L312.0,350.4 L379.6,445.3 L431.6,525.6 L457.6,550.4 L488.8,582.5 L532.5,620.5 L499.2,603.0 L436.8,547.5 L374.4,500.8 L314.1,459.9 L255.8,427.8 L189.3,369.4 L153.9,296.4 L119.6,226.3 L106.1,191.3 L72.8,226.3 L52.0,270.1 L22.9,229.2 L15.6,194.2 Z"/>
-        <g>
-          <text class="reflab" x="276" y="126">Zagreb</text>
-          <text class="reflab" x="288" y="34" text-anchor="end">Čakovec</text>
-          <text class="reflab" x="117" y="196">Rijeka</text>
-          <text class="reflab" x="543" y="164" text-anchor="end">Osijek</text>
-          <text class="reflab" x="324" y="462">Split</text>
-        </g>
-        <g id="markers"></g>
-      </svg>
+      <div id="leafletMap" role="application" aria-label="Interactive map of Croatia with intervention markers"></div>
     </div>
     <div class="detail" id="detail"></div>
   </div>
@@ -209,6 +216,9 @@ footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
      Loaded from a CDN; if it or the socket is unreachable the console falls back
      to plain REST polling on its own, so the page still works fully offline-of-CDN. -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<!-- Leaflet: real tiled basemap instead of a hand-drawn coastline outline. -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
 <script>
 // ── Supabase config ─────────────────────────────────────────────────────────
@@ -219,9 +229,11 @@ const SB_URL = "https://ofzwkanpjhdvlygrhbum.supabase.co";
 const SB_KEY = "sb_publishable_l3UZaMzvgu_8nknqN-xB7g_VZauptFm";
 const LIVE_HOURS = 12, MAX_AGE_DAYS = 3;
 
-// Projection must match vatrocad.py's gazetteer coordinates.
-const LON0=13.4, LAT1=46.65, KX=104.0, KY=146.0;
-const px = (lon,lat) => [ (lon-LON0)*KX, (LAT1-lat)*KY ];
+// Category colors as real hex — Leaflet paints its own canvas, so it can't read
+// the CSS custom properties above. Keep this in sync with :root by eye; both are
+// short lists and rarely change.
+const CATCOLOR={fire:"#ff6a35",tech:"#4d9de0",ems:"#b478ec",accident:"#ffd23f",
+                rescue:"#2ec4b6",other:"#7f8d9b"};
 const CN={fire:"Požar",tech:"Tehnička",ems:"Asistencija HMP",accident:"Nesreća",rescue:"Spašavanje HGSS",other:"Ostalo",
           weather:"Upozorenje",summary:"Sažetak"};
 const SN={active:"Aktivan · na terenu",contained:"Lokaliziran",closed:"Ugašen · završen",unknown:"—"};
@@ -286,6 +298,61 @@ function activeStrip(){
     </div>`).join("");
 }
 
+// ── Map (Leaflet) ────────────────────────────────────────────────────────────
+// A real tiled basemap with pan/zoom, not a hand-drawn coastline. Dark CARTO
+// tiles (free, no API key) to match the console. The view (pan/zoom) is left
+// alone after the first load so a realtime update never yanks it out from
+// under someone who's zoomed into one county.
+let map=null, markerLayer=null, mapInited=false;
+const markersById=new Map();
+
+function initMap(){
+  if(typeof L==="undefined") return;   // CDN unreachable — log/KPIs still work
+  map=L.map("leafletMap",{scrollWheelZoom:true}).setView([45.3,16.6],7);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",{
+    subdomains:"abcd", maxZoom:19,
+    attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
+  }).addTo(map);
+  markerLayer=L.layerGroup().addTo(map);
+}
+
+function renderMap(v){
+  if(!map) return;
+  markerLayer.clearLayers(); markersById.clear();
+  const placed=v.filter(i=>i.lat!=null&&i.lon!=null), seen={};
+  const bounds=[];
+  for(const i of placed){
+    let lat=i.lat, lon=i.lon;
+    // Calls geocode to settlement centroids, so a village brigade lands every
+    // marker on one point. Fan co-located calls out on a deterministic
+    // golden-angle spiral, in small degree offsets rather than pixels.
+    const key=`${lat.toFixed(3)},${lon.toFixed(3)}`;
+    const n=(seen[key]=(seen[key]||0)+1)-1;
+    if(n){ const a=n*2.399, r=0.006*Math.sqrt(n); lat+=r*Math.sin(a); lon+=r*Math.cos(a); }
+    const col=CATCOLOR[i.category]||"#7f8d9b";
+    const active=isActive(i), selected=sel===i.id;
+    const m=L.circleMarker([lat,lon],{
+      radius:selected?9:7, color:selected?"#ffc233":"#080b0e", weight:selected?2.6:1.2,
+      fillColor:col, fillOpacity:.92,
+      className:active?"mk-active":""
+    });
+    m.bindPopup(`<div class="mpop">
+        <span class="bdg" style="background:${col}2e;color:${col}">${esc(CN[i.category]||i.category)}</span>
+        ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}" style="margin-left:4px">${esc(i.status)}</span>`:""}
+        <div class="pt">${esc(i.title)}</div>
+        <div class="pm">${esc(i.location||"")} · ${esc(i.time||"—")}${n?" (stacked at this point)":""}</div>
+      </div>`, {closeButton:true});
+    m.on("click",()=>pick(i.id,{fly:false}));   // Leaflet already opens the popup
+    m.addTo(markerLayer);
+    markersById.set(i.id,m);
+    bounds.push([i.lat,i.lon]);
+  }
+  if(!mapInited && bounds.length){
+    map.fitBounds(bounds,{padding:[24,24],maxZoom:10});
+    mapInited=true;
+  }
+}
+
 function draw(){
   const v=vis();
   $("shown").textContent=v.length+" shown";
@@ -302,20 +369,7 @@ function draw(){
     </div>`).join("")
     : `<div style="padding:26px;text-align:center;color:var(--tx3)">No calls match this filter.</div>`;
 
-  // Calls geocode to settlement centroids, so a village brigade lands every marker
-  // on one point. Fan co-located calls out on a deterministic golden-angle spiral.
-  const placed=v.filter(i=>i.lat!=null), seen={};
-  $("markers").innerHTML = placed.map(i=>{
-    let [x,y]=px(i.lon,i.lat);
-    const key=`${i.lat.toFixed(3)},${i.lon.toFixed(3)}`;
-    const n=(seen[key]=(seen[key]||0)+1)-1;
-    if(n){ const a=n*2.399, r=3.4*Math.sqrt(n); x+=r*Math.cos(a); y+=r*Math.sin(a); }
-    return `<g class="mk ${sel===i.id?"sel":""} ${isActive(i)?"act":""}" data-id="${esc(i.id)}" tabindex="0" role="button"
-        aria-label="${esc(i.title)}">
-      <circle class="hit" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="10"></circle>
-      <circle class="dot" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.2" fill="var(--${i.category})"></circle>
-      <title>${esc(i.ref)} — ${esc(i.title)}${n?" (stacked at "+esc(i.location)+")":""}</title></g>`;
-  }).join("");
+  renderMap(v);
   kpis(); activeStrip();
 }
 
@@ -341,17 +395,31 @@ function detail(i){
       ${i.raw?`<br><br>${esc(i.raw)}`:""}</div>`;
 }
 
-function pick(id){
+// Selecting a call must actually show its detail — on a phone the map sits
+// between the log and the detail panel, well off-screen, so scroll it into
+// view (a no-op on desktop, where it's already visible) and flash it so the
+// update is obvious even without scrolling.
+function pick(id,opts){
+  const wasSel=sel;
   sel = sel===id ? null : id;
-  draw(); detail([...DATA.incidents,...DATA.context].find(i=>i.id===sel));
+  draw();
+  const found=[...DATA.incidents,...DATA.context].find(i=>i.id===sel);
+  detail(found);
+  if(sel && sel!==wasSel){
+    const d=$("detail");
+    d.scrollIntoView({behavior:"smooth",block:"nearest"});
+    d.classList.remove("flash"); void d.offsetWidth; d.classList.add("flash");
+    if(map && found?.lat!=null && (!opts||opts.fly!==false)){
+      map.flyTo([found.lat,found.lon],Math.max(map.getZoom(),9),{duration:.6});
+    }
+    const mk=markersById.get(sel);
+    if(mk && !mk.isPopupOpen()) mk.openPopup();
+  }
 }
 $("rows").addEventListener("click",e=>{const r=e.target.closest(".row"); if(r)pick(r.dataset.id);});
 $("rows").addEventListener("keydown",e=>{const r=e.target.closest(".row");
   if(r&&(e.key==="Enter"||e.key===" ")){e.preventDefault();pick(r.dataset.id);}});
 $("acards").addEventListener("click",e=>{const c=e.target.closest(".acard"); if(c)pick(c.dataset.id);});
-$("markers").addEventListener("click",e=>{const g=e.target.closest(".mk"); if(g)pick(g.dataset.id);});
-$("markers").addEventListener("keydown",e=>{const g=e.target.closest(".mk");
-  if(g&&(e.key==="Enter"||e.key===" ")){e.preventDefault();pick(g.dataset.id);}});
 $("filters").addEventListener("click",e=>{
   const b=e.target.closest(".f"); if(!b)return;
   F[b.dataset.k]=b.dataset.v; sel=null;
@@ -402,7 +470,13 @@ function syncHeader(){
 function rebuild(){
   const all=[...ROWS.values()].map(mapRow)
     .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time));
-  DATA.incidents=all.filter(i=>i.category!=="summary"&&i.category!=="weather");
+  // Defensive: an incident (never a weather forecast, which is legitimately
+  // future-dated) timestamped after "now" is bad data, not a live call — a stale
+  // scrape or a bad date parse. Never let one render as "just now". A five-minute
+  // grace absorbs ordinary clock skew between this browser and the database.
+  const cutoff=nowMs()+5*6e4;
+  DATA.incidents=all.filter(i=>i.category!=="summary" && i.category!=="weather"
+    && (!i.date || tsOf(i.date,i.time)<=cutoff));
   DATA.context  =all.filter(i=>i.category==="summary"||i.category==="weather");
   const live=DATA.incidents.filter(isLive).length;
   const act =DATA.incidents.filter(i=>isActive(i)&&isRecent(i)).length;
@@ -462,8 +536,10 @@ $("foot").innerHTML=`Live from a <b>Supabase</b> Postgres backend over a realtim
   (read-only publishable key, row-level security; falls back to 30s REST polling if the socket drops).
   Rows are pushed by <code>vatrocad.py</code>, which polls Croatia's public brigade, ŽVOC, police and
   HVZ pages. Dispatch itself runs on HVZ's closed <b>UVI/VATROnet</b>; these public pages are the only
-  open surface. Window: live = ${LIVE_HOURS}h, log capped at ${MAX_AGE_DAYS} days.`;
+  open surface. Window: live = ${LIVE_HOURS}h, log capped at ${MAX_AGE_DAYS} days. Map tiles ©
+  OpenStreetMap contributors, © CARTO.`;
 
+initMap();
 load().then(startRealtime);
 // Fast poll only until realtime is confirmed up; a slow safety re-sync always runs
 // so a missed websocket event can never leave the board stale for long.
