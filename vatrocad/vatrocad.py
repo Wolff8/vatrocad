@@ -736,6 +736,19 @@ NEWSROOMS = [
      "požega", "poz", False),
     ("Bjelovar.live · kronika", "bbz", "https://bjelovar.live/category/crna-kronika/feed/",
      "bjelovar", "bjl", False),
+    # North-region additions. Krapina-Zagorje had zero coverage before this —
+    # RHZK ("Radio Hrvatsko zagorje Krapina") looked promising but its
+    # crna-kronika category is a dead archive (newest item from 2014);
+    # zagorje.com's own /rss is live and current instead. Vzaktualno
+    # complements the existing thin Varaždinski feed for Varaždin. ICV is
+    # Virovitica-Podravina — not strictly "north" but a genuinely new county
+    # found in the same search, confirmed live at multiple posts/day.
+    ("Zagorje.com · kronika", "kzz", "https://www.zagorje.com/rss",
+     "krapina", "zgc", False),
+    ("Vzaktualno · kronika", "vaz", "https://vzaktualno.hr/category/crna-kronika/feed/",
+     "varaždin", "vza", False),
+    ("ICV · kronika", "vpz", "https://www.icv.hr/vijesti/crna-kronika/feed/",
+     "virovitica", "icv", False),
 ]
 
 
