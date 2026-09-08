@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>VatroCAD — dispatch console</title>
+<title>VatroCAD — HR · AT dispatch console</title>
 <!-- Designed in IBM Plex; loaded async so an offline machine paints on the
      fallback stacks rather than blocking on a font that never arrives. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -89,7 +89,8 @@ button.rf:disabled{opacity:.5;cursor:wait}
 .f:focus-visible{outline:2px solid var(--warn);outline-offset:1px}
 .rows{max-height:640px;overflow-y:auto}
 .row{display:grid;grid-template-columns:13px 58px 1fr auto;gap:9px;align-items:start;
-  padding:8px 11px 8px 0;border-bottom:1px solid var(--line);cursor:pointer;border-left:3px solid transparent}
+  padding:8px 11px 8px 0;border-bottom:1px solid var(--line);cursor:pointer;border-left:3px solid transparent;
+  transition:background .18s;animation:rowIn .38s cubic-bezier(.2,.7,.2,1) both}
 .row:hover{background:var(--panel2)}
 .row[aria-selected=true]{background:var(--panel3);border-left-color:var(--warn)}
 .row.act{border-left-color:var(--active)}
@@ -145,33 +146,60 @@ button.rf:disabled{opacity:.5;cursor:wait}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .legend i{width:9px;height:9px;border-radius:1px}
 footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
-/* Austria: deliberately no map, just a live feed — see index.html header
-   comment. Its own list style, separate from the Croatian .row rows, so the
-   "younger than 1h" red+bold treatment reads as a distinct alert state
-   rather than reusing the Croatian "live" green. */
-#atPane{margin-top:0}
-.at-list{max-height:520px;overflow-y:auto}
-.at-row{display:grid;grid-template-columns:26px 70px 1fr auto;gap:10px;align-items:start;
-  padding:9px 12px;border-bottom:1px solid var(--line)}
-.at-row:last-child{border-bottom:none}
-.at-icon{font-size:17px;line-height:1.3;text-align:center}
+/* ── Motion. Rows enter with a short fade-slide (staggered inline per row),
+   and the Austrian "younger than 1h" rows carry a slow glow so a genuinely
+   new call is visible at a glance without reading every line. Respects the
+   OS reduced-motion preference. ── */
+@keyframes rowIn{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+@keyframes freshGlow{0%,100%{box-shadow:inset 3px 0 0 var(--bad)}
+  50%{box-shadow:inset 3px 0 0 var(--bad),0 0 16px color-mix(in srgb,var(--bad) 45%,transparent)}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* ── Austria pane: its own visual language (icons, Slovenian labels, red
+   freshness state), a second map, and a Slovenian detail panel. ── */
+.at-pane{border-color:color-mix(in srgb,var(--bad) 30%,var(--line))}
+.at-sub{padding:6px 12px 7px;font-size:10.5px;color:var(--tx3);line-height:1.5;
+  border-bottom:1px solid var(--line);background:var(--panel2)}
+.at-counters{font-size:10px;letter-spacing:.06em;text-transform:none;color:var(--tx3)}
+.at-counters b{color:var(--tx);font-weight:600}
+.at-counters .hot{color:var(--bad)}
+.at-grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
+@media(max-width:920px){.at-grid{grid-template-columns:1fr}}
+.at-list{max-height:660px;overflow-y:auto;border-right:1px solid var(--line)}
+@media(max-width:920px){.at-list{border-right:none;max-height:520px}}
+#atMap{height:340px;border-radius:2px;background:var(--bg)}
+.at-detail{min-height:170px;scroll-margin-top:12px}
+.at-row{display:grid;grid-template-columns:30px 66px 1fr;gap:10px;align-items:start;
+  padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer;
+  border-left:3px solid transparent;transition:background .18s,transform .18s;
+  animation:rowIn .38s cubic-bezier(.2,.7,.2,1) both}
+.at-row:hover{background:var(--panel2);transform:translateX(2px)}
+.at-row:focus-visible{outline:2px solid var(--warn);outline-offset:-2px}
+.at-row[aria-selected=true]{background:var(--panel3);border-left-color:var(--warn)}
+.at-row.act{border-left-color:var(--active)}
+.at-row.ex{opacity:.7}
+.at-row.ex .att{font-style:italic;font-weight:400;color:var(--tx2)}
+.at-icon{font-size:20px;line-height:1.2;text-align:center;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}
 .at-t{font-size:10px;color:var(--tx3);line-height:1.35}
 .at-t b{display:block;color:var(--tx2);font-weight:500}
-.at-body .att{font-size:12px;font-weight:500;line-height:1.4}
-.at-body .atl{font-size:10.5px;color:var(--tx2);margin-top:1px}
-.at-body .atu{font-size:9.5px;color:var(--tx3);margin-top:2px;font-family:"IBM Plex Mono",monospace}
+.at-body .att{font-size:12.5px;font-weight:500;line-height:1.4}
+.at-body .atl{font-size:10.5px;color:var(--tx2);margin-top:2px}
+.at-body .atu{font-size:9.5px;color:var(--tx3);margin-top:3px;font-family:"IBM Plex Mono",monospace;line-height:1.45}
 .at-badge{font-size:9px;letter-spacing:.09em;text-transform:uppercase;color:var(--tx3);
   padding:2px 6px;border:1px solid var(--line2);border-radius:2px;white-space:nowrap}
-/* The freshness alert: red, bold, a slightly larger/heavier font so a viewer
-   catches it without reading every row — a genuinely different visual state,
-   not just a color tweak on the normal row. */
-.at-row.fresh{background:color-mix(in srgb,var(--bad) 8%,transparent);
-  border-left:3px solid var(--bad)}
-.at-row.fresh .att{color:var(--bad);font-weight:700;font-size:12.5px}
-.at-row.fresh .at-t{color:var(--bad)}
-.at-row.fresh .at-t b{color:var(--bad)}
+/* The freshness alert: red, bold, a heavier and larger face than the normal
+   row — a genuinely different visual state, not a color tweak. */
+.at-row.fresh{background:linear-gradient(90deg,color-mix(in srgb,var(--bad) 16%,transparent),transparent 72%);
+  border-left-color:var(--bad);animation:rowIn .38s both,freshGlow 2.4s ease-in-out infinite}
+.at-row.fresh .att{color:#ff5e5e;font-weight:800;font-size:14px;letter-spacing:.005em}
+.at-row.fresh .at-t,.at-row.fresh .at-t b{color:#ff5e5e}
 .at-row.fresh .at-badge{color:var(--bad);border-color:var(--bad)}
 .fresh-legend{color:var(--bad);font-weight:600}
+.at-kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px;margin-top:8px}
+.at-exp{margin-top:9px;padding:8px 10px;background:var(--panel3);border-left:3px solid var(--tx3);
+  border-radius:3px;font-size:11.5px;line-height:1.55;color:var(--tx2)}
+.at-exp b{color:var(--tx)}
+.at-mk-ex{opacity:.55}
 </style>
 </head>
 <body>
@@ -235,17 +263,29 @@ footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
   </div>
 </div>
 
-<div class="pane" id="atPane">
-  <h3><span>🇦🇹 Avstrija · Gasilske intervencije v živo</span><span id="atShown" class="mono"></span></h3>
-  <div class="filters">
-    <button class="f" data-at="all" aria-pressed="true">Vse</button>
+<div class="pane at-pane" id="atPane">
+  <h3><span>🇦🇹 Avstrija · gasilske intervencije v živo</span><span class="at-counters mono" id="atCounters"></span></h3>
+  <div class="at-sub">Spodnja in Zgornja Avstrija · uradni dispečerski sistemi deželnih gasilskih zvez (Wastl NÖ, LFV OÖ) ·
+    osveženo vsakih 15 min · <span class="fresh-legend">rdeče = dojava mlajša od 1 ure</span> · klik na vrstico ali oznako na zemljevidu odpre podrobnosti v slovenščini</div>
+  <div class="filters" id="atFilters">
+    <button class="f" data-at="all" aria-pressed="true">Vse dežele</button>
     <button class="f" data-at="ooe" aria-pressed="false">Zgornja Avstrija (OÖ)</button>
     <button class="f" data-at="noe" aria-pressed="false">Spodnja Avstrija (NÖ)</button>
+    <span style="width:10px"></span>
+    <button class="f" data-attog="active" aria-pressed="false">Samo aktivne</button>
+    <button class="f" data-attog="ex" aria-pressed="true">🎓 Vaje</button>
   </div>
-  <div class="at-list" id="atList"></div>
+  <div class="at-grid">
+    <div class="at-list" id="atList" role="listbox" aria-label="Intervencije v Avstriji"></div>
+    <div>
+      <div class="mapwrap"><div id="atMap" role="application" aria-label="Zemljevid intervencij v Avstriji"></div></div>
+      <div class="detail at-detail" id="atDetail"></div>
+    </div>
+  </div>
   <div class="legend">
-    <span>🔥 Požar</span><span>🔧 Tehnično reševanje</span><span>🚧 Prometna nesreča</span>
-    <span>📋 Drugo</span><span class="fresh-legend">🆕 mlajše od 1 ure</span>
+    <span>🔥 Požar</span><span>🔧 Tehnično</span><span>🚧 Prometna nesreča</span><span>🆘 Reševanje oseb/živali</span>
+    <span>🚑 NMP · 🚁 helikopter</span><span>📋 Drugo</span><span>🎓 Vaja</span>
+    <span class="fresh-legend">🆕 mlajše od 1 ure</span>
   </div>
 </div>
 
@@ -278,12 +318,31 @@ const CATCOLOR={fire:"#ff6a35",tech:"#4d9de0",ems:"#b478ec",accident:"#ffd23f",
 const CN={fire:"Požar",tech:"Tehnička",ems:"Asistencija HMP",accident:"Nesreća",rescue:"Spašavanje HGSS",other:"Ostalo",
           weather:"Upozorenje",summary:"Sažetak"};
 const SN={active:"Aktivan · na terenu",contained:"Lokaliziran",closed:"Ugašen · završen",unknown:"—"};
-// Austria feed: icon + Slovenian category label per incident category.
-const AT_ICON={fire:"🔥",tech:"🔧",accident:"🚧",other:"📋"};
-const AT_CAT_SL={fire:"Požar",tech:"Tehnično reševanje",accident:"Prometna nesreča",other:"Drugo"};
+// ── Austria feed: icons and Slovenian labels ────────────────────────────────
+const AT_ICON={fire:"🔥",tech:"🔧",accident:"🚧",rescue:"🆘",ems:"🚑",other:"📋",exercise:"🎓"};
+const AT_CAT_SL={fire:"Požar",tech:"Tehnično reševanje",accident:"Prometna nesreča",
+  rescue:"Reševanje oseb/živali",ems:"Nujna medicinska pomoč",other:"Drugo",exercise:"Vaja"};
 const AT_STATE_SL={ooe:"Zgornja Avstrija",noe:"Spodnja Avstrija"};
+const AT_STATUS_SL={active:"AKTIVNO",closed:"ZAKLJUČENO",contained:"LOKALIZIRANO",unknown:"—"};
+// The Austrian alarm-code scheme as NÖ's dispatch uses it: a letter for the
+// kind of call, a digit for its scale ("Alarmstufe"). OÖ uses plain
+// descriptive names instead of codes.
+const AT_KIND_SL={B:"B = Brand — požar",T:"T = Technischer Einsatz — tehnična intervencija",
+  S:"S = Schadstoff — nevarne snovi / iztekanje",SOF:"SOF = Sonderfall — druge naloge (podpora, izvidovanje, pomoč drugi službi)",
+  U:"U = Übung — vaja, ni resnična intervencija"};
+const AT_LEVEL_SL={0:"stopnja 0 — brez nevarnosti, rutinska ali podporna naloga",
+  1:"stopnja 1 — manjši obseg, običajno ena gasilska enota",
+  2:"stopnja 2 — srednji obseg, več enot, ogrožene osebe",
+  3:"stopnja 3 — večji obseg, enote iz sosednjih krajev",
+  4:"stopnja 4 — velik dogodek, številne enote z območja"};
+const atExplain=raw=>{const m=/^(SOF|[BTSU])(\d)\b/.exec(raw||"");
+  if(!m) return "Opisni naziv brez alarmne kode (Zgornja Avstrija kod ne uporablja).";
+  return `${AT_KIND_SL[m[1]]||m[1]} · ${AT_LEVEL_SL[m[2]]||("stopnja "+m[2])}`;};
+const isHeli=i=>/Hubschrauber|Landeplatz|Notarzt/i.test(i.raw||"");
+const ageSl=i=>{const h=Math.max(0,Math.round(ageMs(i)/36e5));
+  return h<1?"pravkar":h<24?`pred ${h} h`:`pred ${Math.round(h/24)} d`;};
 let DATA={incidents:[],context:[],sources:[],austria:[]}, F={cat:"all",reg:"all",win:"live"}, sel=null;
-let atFilter="all";   // all | ooe | noe
+let atFilter="all", atShowEx=true, atOnlyActive=false, atSel=null;   // Austria view state
 // ROWS is the single source of truth: raw DB rows keyed by id. REST fills it on
 // load; realtime patches it row-by-row. rebuild() derives everything from it.
 const ROWS=new Map();
@@ -358,16 +417,24 @@ function activeStrip(){
 // under someone who's zoomed into one county.
 let map=null, markerLayer=null, mapInited=false;
 const markersById=new Map();
+let atMap=null, atMarkerLayer=null, atMapInited=false;
+const atMarkersById=new Map();
 const ESRI_ATTR='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ';
+const ESRI_BASE="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}";
+const ESRI_REF ="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}";
 
+function darkMap(el,center,zoom){
+  const m=L.map(el,{scrollWheelZoom:true}).setView(center,zoom);
+  L.tileLayer(ESRI_BASE,{maxZoom:16,attribution:ESRI_ATTR}).addTo(m);
+  L.tileLayer(ESRI_REF,{maxZoom:16}).addTo(m);   // labels-only overlay, stacks above the base since it's added second
+  return m;
+}
 function initMap(){
   if(typeof L==="undefined") return;   // CDN unreachable — log/KPIs still work
-  map=L.map("leafletMap",{scrollWheelZoom:true}).setView([45.3,16.6],7);
-  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
-    {maxZoom:16, attribution:ESRI_ATTR}).addTo(map);
-  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
-    {maxZoom:16}).addTo(map);   // labels-only overlay (transparent background), stacks above the base tile since it's added second
+  map=darkMap("leafletMap",[45.3,16.6],7);
   markerLayer=L.layerGroup().addTo(map);
+  atMap=darkMap("atMap",[47.9,15.2],7);
+  atMarkerLayer=L.layerGroup().addTo(atMap);
 }
 
 function renderMap(v){
@@ -410,8 +477,8 @@ function renderMap(v){
 function draw(){
   const v=vis();
   $("shown").textContent=v.length+" shown";
-  $("rows").innerHTML = v.length ? v.map(i=>`
-    <div class="row ${isActive(i)?"act":""}" tabindex="0" role="option" aria-selected="${sel===i.id}" data-id="${esc(i.id)}">
+  $("rows").innerHTML = v.length ? v.map((i,idx)=>`
+    <div class="row ${isActive(i)?"act":""}" tabindex="0" role="option" aria-selected="${sel===i.id}" data-id="${esc(i.id)}" style="animation-delay:${Math.min(idx*22,440)}ms">
       <div class="tk" style="background:var(--${i.category})"></div>
       <div class="rt mono"><b>${esc(i.date.slice(8))}.${esc(i.date.slice(5,7))}.</b>${esc(i.time||"—")}<span style="display:block;color:${isLive(i)?"var(--ok)":"var(--tx3)"}">${ageLabel(i)}</span></div>
       <div>
@@ -427,35 +494,121 @@ function draw(){
   kpis(); activeStrip();
 }
 
-// Austria: a live feed only — no map, no window toggle (the server already
-// deletes anything past AT_MAX_AGE_DAYS, so there is nothing to hide here
-// that isn't already gone). Just the state filter and the row list, with
-// calls under an hour old flagged red so they can't be missed.
-function drawAustria(){
-  const v=DATA.austria.filter(i=>atFilter==="all"||i.region===atFilter)
+// ── Austria: live feed + its own map + Slovenian detail panel. No window
+// toggle (the server already deletes anything past AT_MAX_AGE_DAYS); filters
+// are state, "only active", and whether training exercises are shown.
+// Calls under an hour old are flagged red so they can't be missed. ──
+function atVis(){
+  return DATA.austria.filter(i=>(atFilter==="all"||i.region===atFilter)
+      && (atShowEx||i.category!=="exercise") && (!atOnlyActive||i.status==="active"))
     .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time));
-  $("atShown").textContent=v.length+" prikazano";
-  $("atList").innerHTML = v.length ? v.map(i=>{
-    const fresh=isVeryFresh(i);
-    return `<div class="at-row ${fresh?"fresh":""}">
-      <div class="at-icon">${AT_ICON[i.category]||"⚠️"}</div>
-      <div class="at-t mono"><b>${esc(i.date.slice(8))}.${esc(i.date.slice(5,7))}.</b>${esc(i.time||"—")}<span style="display:block">${fresh?"🆕 ":""}${ageLabel(i)}</span></div>
+}
+const atIcon=i=>isHeli(i)?"🚁":(AT_ICON[i.category]||"⚠️");
+
+function drawAustria(){
+  const v=atVis(), all=DATA.austria;
+  const real=all.filter(i=>i.category!=="exercise");
+  const act=real.filter(i=>i.status==="active").length, hot=real.filter(isVeryFresh).length;
+  const ex=all.length-real.length;
+  $("atCounters").innerHTML=`<b class="${act?"hot":""}">${act}</b> aktivno · <b class="${hot?"hot":""}">${hot}</b> zadnja ura · ${ex} vaj · ${v.length}/${all.length} prikazano`;
+  $("atList").innerHTML = v.length ? v.map((i,idx)=>{
+    const fresh=isVeryFresh(i)&&i.category!=="exercise";
+    return `<div class="at-row ${fresh?"fresh":""} ${i.status==="active"?"act":""} ${i.category==="exercise"?"ex":""}"
+        role="option" tabindex="0" aria-selected="${atSel===i.id}" data-id="${esc(i.id)}" style="animation-delay:${Math.min(idx*22,440)}ms">
+      <div class="at-icon">${atIcon(i)}</div>
+      <div class="at-t mono"><b>${esc(i.date.slice(8))}.${esc(i.date.slice(5,7))}.</b>${esc(i.time||"—")}<span style="display:block">${fresh?"🆕 ":""}${ageSl(i)}</span></div>
       <div class="at-body">
-        <div class="att">${esc(i.title)}</div>
+        <div class="att">${esc(i.title)} ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}">${AT_STATUS_SL[i.status]||esc(i.status)}</span>`:""}</div>
         <div class="atl">${esc(i.location||"")} · <span class="at-badge">${esc(AT_STATE_SL[i.region]||i.region)}</span></div>
         <div class="atu">${esc(i.units||"")}${i.raw?" · "+esc(i.raw):""}</div>
       </div>
     </div>`;
   }).join("")
     : `<div style="padding:26px;text-align:center;color:var(--tx3)">Trenutno ni intervencij v tem filtru.</div>`;
+  atRenderMap(v);
 }
-document.querySelectorAll('#atPane .filters .f').forEach(b=>{
-  b.addEventListener("click",()=>{
+
+function atRenderMap(v){
+  if(!atMap) return;
+  atMarkerLayer.clearLayers(); atMarkersById.clear();
+  const placed=v.filter(i=>i.lat!=null&&i.lon!=null), seen={}, bounds=[];
+  for(const i of placed){
+    let lat=i.lat, lon=i.lon;
+    const key=`${lat.toFixed(3)},${lon.toFixed(3)}`;
+    const n=(seen[key]=(seen[key]||0)+1)-1;
+    if(n){ const a=n*2.399, r=0.006*Math.sqrt(n); lat+=r*Math.sin(a); lon+=r*Math.cos(a); }
+    const ex=i.category==="exercise", fresh=isVeryFresh(i)&&!ex, selected=atSel===i.id;
+    const col=ex?"#8a93a0":(CATCOLOR[i.category]||"#7f8d9b");
+    const m=L.circleMarker([lat,lon],{
+      radius:selected?9:(fresh?8:6.5), color:selected?"#ffc233":(fresh?"#ff5e5e":"#080b0e"),
+      weight:selected?2.6:(fresh?2:1.2), fillColor:col, fillOpacity:ex?.5:.92,
+      className:(i.status==="active"&&!ex)?"mk-active":(ex?"at-mk-ex":"")
+    });
+    m.bindPopup(`<div class="mpop">
+        <span class="bdg" style="background:${col}2e;color:${col}">${atIcon(i)} ${esc(AT_CAT_SL[i.category]||i.category)}</span>
+        ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}" style="margin-left:4px">${AT_STATUS_SL[i.status]||i.status}</span>`:""}
+        <div class="pt">${esc(i.title)}</div>
+        <div class="pm">${esc(i.location||"")} · ${esc(i.time||"—")} · ${ageSl(i)}</div>
+      </div>`,{closeButton:true});
+    m.on("click",()=>atPick(i.id,{fly:false}));
+    m.addTo(atMarkerLayer); atMarkersById.set(i.id,m); bounds.push([i.lat,i.lon]);
+  }
+  if(!atMapInited && bounds.length){ atMap.fitBounds(bounds,{padding:[24,24],maxZoom:9}); atMapInited=true; }
+}
+
+function atDetail(i){
+  const d=$("atDetail");
+  if(!i){ d.innerHTML=`<div style="color:var(--tx3);font-size:12px;padding-top:30px;text-align:center">
+    Izberi intervencijo s seznama ali oznako na zemljevidu.</div>`; return; }
+  const col=i.category==="exercise"?"#8a93a0":(CATCOLOR[i.category]||"#7f8d9b");
+  d.innerHTML=`
+    <div class="dh"><span class="bdg" style="background:${col}2e;color:${col}">${atIcon(i)} ${esc(AT_CAT_SL[i.category]||i.category)}</span>
+      ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}">${AT_STATUS_SL[i.status]||esc(i.status)}</span>`:""}
+      ${isVeryFresh(i)?`<span class="pill active">🆕 NOVO</span>`:""}
+      <span class="dt">${esc(i.title)}</span></div>
+    <div class="at-kv">
+      <div><div class="dl">Kraj</div><div class="dv">${esc(i.location||"—")}</div></div>
+      <div><div class="dl">Zvezna dežela</div><div class="dv">${esc(AT_STATE_SL[i.region]||i.region)}</div></div>
+      <div><div class="dl">Datum dojave</div><div class="dv">${esc(i.date)}</div></div>
+      <div><div class="dl">Ura dojave</div><div class="dv">${esc(i.time||"—")} · ${ageSl(i)}</div></div>
+      <div><div class="dl">Stanje</div><div class="dv">${AT_STATUS_SL[i.status]||"—"}</div></div>
+      <div><div class="dl">Št. enot</div><div class="dv">${i.vehicles??(i.units?i.units.split(",").length:"—")}</div></div>
+      <div><div class="dl">Referenca</div><div class="dv">${esc(i.ref||"—")}</div></div>
+      <div><div class="dl">Vir</div><div class="dv">${esc(i.source)}</div></div>
+    </div>
+    <div class="at-exp"><b>Koda in stopnja:</b> ${esc(atExplain(i.raw))}<br>
+      <b>Izvirni nemški zapis:</b> ${esc(i.raw||"—")}<br>
+      <b>Vrsta:</b> ${esc(AT_CAT_SL[i.category]||i.category)}${isHeli(i)?" · 🚁 v besedilu je omenjen helikopter / zdravnik NMP":""}</div>
+    <div class="dn"><b>Alarmirane enote:</b> ${esc(i.units||"—")}<br>
+      ${i.link?`<b>Uradna stran:</b> <a href="${esc(i.link)}" target="_blank" rel="noopener">odpri vir</a>`:""}</div>`;
+}
+
+function atPick(id,opts){
+  const was=atSel; atSel = atSel===id ? null : id;
+  drawAustria();
+  const found=DATA.austria.find(i=>i.id===atSel);
+  atDetail(found);
+  if(atSel && atSel!==was){
+    const d=$("atDetail");
+    d.scrollIntoView({behavior:"smooth",block:"nearest"});
+    d.classList.remove("flash"); void d.offsetWidth; d.classList.add("flash");
+    if(atMap && found?.lat!=null && (!opts||opts.fly!==false)) atMap.flyTo([found.lat,found.lon],Math.max(atMap.getZoom(),10),{duration:.6});
+    const mk=atMarkersById.get(atSel); if(mk && !mk.isPopupOpen()) mk.openPopup();
+  }
+}
+$("atList").addEventListener("click",e=>{const r=e.target.closest(".at-row"); if(r)atPick(r.dataset.id);});
+$("atList").addEventListener("keydown",e=>{const r=e.target.closest(".at-row");
+  if(r&&(e.key==="Enter"||e.key===" ")){e.preventDefault();atPick(r.dataset.id);}});
+$("atFilters").addEventListener("click",e=>{
+  const b=e.target.closest(".f"); if(!b) return;
+  if(b.dataset.at){
     atFilter=b.dataset.at;
-    document.querySelectorAll('#atPane .filters .f').forEach(o=>o.setAttribute("aria-pressed",String(o===b)));
-    drawAustria();
-  });
+    document.querySelectorAll('#atFilters .f[data-at]').forEach(o=>o.setAttribute("aria-pressed",String(o===b)));
+  }else if(b.dataset.attog==="active"){ atOnlyActive=!atOnlyActive; b.setAttribute("aria-pressed",String(atOnlyActive)); }
+  else if(b.dataset.attog==="ex"){ atShowEx=!atShowEx; b.setAttribute("aria-pressed",String(atShowEx)); }
+  atSel=null; drawAustria(); atDetail(null);
 });
+atDetail(null);
 
 function detail(i){
   const d=$("detail");

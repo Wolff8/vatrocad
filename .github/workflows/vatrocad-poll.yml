@@ -36,6 +36,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      # The local SQLite holds the Nominatim geocode cache. Runners are
+      # ephemeral, so without this every 15-minute poll would re-geocode the
+      # same ~100 Austrian towns from scratch (~2 minutes of rate-limited
+      # calls, and thousands of needless Nominatim requests a day). A fresh
+      # key per run means the cache is re-saved with new entries every time;
+      # restore-keys pulls the most recent one in.
+      - name: Restore geocode cache
+        uses: actions/cache@v4
+        with:
+          path: vatrocad/vatrocad.sqlite3
+          key: vatrocad-db-${{ github.run_id }}
+          restore-keys: |
+            vatrocad-db-
+
       # vatrocad.py is stdlib-only — nothing to pip install.
       - name: Poll sources and push to Supabase
         working-directory: vatrocad

@@ -1,0 +1,35 @@
+# Source-discovery helper: fetch a URL from the GitHub runner's network and
+# print headers + the first part of the body into the job log. Some sites
+# (e.g. Styria's einsatzuebersicht.lfv.steiermark.at) are unreachable from the
+# development sandbox's egress but fine from here, and this is how a new
+# source gets inspected before a parser is written for it. Manual trigger only.
+name: probe URL
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL to fetch"
+        required: true
+        type: string
+      bytes:
+        description: "How many bytes of the body to print"
+        required: false
+        default: "6000"
+        type: string
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Fetch
+        env:
+          URL: ${{ inputs.url }}
+          N: ${{ inputs.bytes }}
+        run: |
+          echo "== HEAD =="
+          curl -sSIL -A "VatroCAD/1.0 (+https://github.com/Wolff8/vatrocad)" --max-time 30 "$URL" || true
+          echo "== BODY (first $N bytes) =="
+          curl -sSL -A "VatroCAD/1.0 (+https://github.com/Wolff8/vatrocad)" --max-time 30 "$URL" | head -c "$N" || true
+          echo

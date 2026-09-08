@@ -106,7 +106,9 @@ def push_supabase(rows):
             "country": r.get("country", "HR"),
             "ref": r.get("ref"), "occurred": r.get("date") or None,
             "occurred_time": r.get("time") or None, "ts": to_ts(r.get("date", ""), r.get("time", "")),
-            "category": r.get("category"), "status": status_of(blob),
+            # A source that knows its own status (Austria's dispatch pages do)
+            # passes it explicitly; otherwise derive it from Croatian verbs.
+            "category": r.get("category"), "status": r.get("status") or status_of(blob),
             "title": r.get("title"), "location": r.get("location"),
             "lat": r.get("lat"), "lon": r.get("lon"), "units": r.get("units"),
             "crew": r.get("crew"), "vehicles": r.get("vehicles"),
@@ -136,18 +138,28 @@ def prune_supabase_austria(days=MAX_AGE_DAYS):
     Never raises — a failed prune must not stop polling."""
     if not (SUPABASE_URL and SUPABASE_KEY):
         return "off"
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    url = f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&occurred=lt.{cutoff}"
-    req = urllib.request.Request(url, method="DELETE", headers={
-        "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Prefer": "return=minimal"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return f"pruned ({resp.status})"
-    except urllib.error.HTTPError as e:
-        return f"error: HTTP {e.code} {e.read()[:300].decode('utf-8', 'replace')}"
-    except Exception as e:                                        # noqa: BLE001
-        return f"error: {type(e).__name__}"
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    stale_live = (now - timedelta(minutes=40)).isoformat(timespec="seconds")
+    hdr = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Prefer": "return=minimal"}
+    results = []
+    for label, url in (
+        # Age-out: anything past the retention window.
+        ("age", f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&occurred=lt.{cutoff}"),
+        # NÖ "running" rows are re-pushed (last_seen refreshed) every poll for
+        # as long as the call is open; one not re-seen for 40 minutes has
+        # closed and its exact-time history row has replaced it.
+        ("live", f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&ref=like.NOE-LIVE*&last_seen=lt.{urllib.parse.quote(stale_live)}"),
+    ):
+        req = urllib.request.Request(url, method="DELETE", headers=hdr)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                results.append(f"{label} {resp.status}")
+        except urllib.error.HTTPError as e:
+            results.append(f"{label} error HTTP {e.code} {e.read()[:200].decode('utf-8', 'replace')}")
+        except Exception as e:                                    # noqa: BLE001
+            results.append(f"{label} error {type(e).__name__}")
+    return "pruned (" + ", ".join(results) + ")"
 
 # --------------------------------------------------------------------------
 # Gazetteer. No geocoding service — a static table keeps the app offline-safe.
@@ -1314,87 +1326,176 @@ def src_hac():
 
 # ==========================================================================
 # Austria — Oberösterreich (Upper Austria) and Niederösterreich (Lower
-# Austria) state fire-brigade dispatch systems. A second country, added
-# deliberately narrower than Croatia: no map, no forever-archive — a live
-# feed only, pruned to AT_MAX_AGE_DAYS by an actual delete (see
-# prune_supabase_austria), not just hidden client-side the way Croatia's
-# older-than-3-days rows still sit in the database.
+# Austria) state fire-brigade dispatch systems. A second country, run on a
+# narrower rule than Croatia: live feed, pruned to AT_MAX_AGE_DAYS by an
+# actual delete (see prune_supabase_austria), not just hidden client-side.
 #
-# Both systems are real state fire-command dispatch logs, server-rendered,
-# no auth, no JS needed — genuinely live, minute-to-second precision. Verified
-# manually against the running services before wiring in.
+# Both are real state fire-command dispatch logs, server-rendered, no auth,
+# no JS — genuinely live, minute-to-second precision, verified by hand
+# against the running services. Training exercises ARE kept (category
+# "exercise") so the console can show them, distinctly marked, rather than
+# silently dropping them; and each call carries a real status: NÖ from its
+# separate "currently running" endpoint, OÖ from per-unit end times.
 # ==========================================================================
 AT_MAX_AGE_DAYS = 3
 
-# German → Slovenian glossary for the fixed, small vocabulary these two
-# systems actually use. This is a phrase glossary, not a general translator:
-# longest phrases match first, and anything not in the list is left in
-# German rather than guessed at — the original German always survives
-# untouched in `raw` regardless, so nothing is ever lost, only clarified.
+# German → Slovenian glossary for the fixed vocabulary these systems use.
+# A phrase glossary, not a general translator: longest phrases match first,
+# anything unknown stays German rather than being guessed at, and the
+# untouched German original always survives in `raw`. Every string below
+# was observed in the live feeds (NÖ: 30 type strings; OÖ: ~45), plus the
+# obvious siblings of each.
 AT_SL_GLOSSARY = [
-    # Fixed NÖ type-code phrases, longest/most specific first.
-    ("Brandsicherheitswache", "gasilska požarna straža"),
+    # ── NÖ fixed type-code phrases ──
+    ("Brandsicherheitswache", "požarna straža (dežurstvo)"),
+    ("Fahrzeugbrand - Klein", "požar vozila – manjši"),
+    ("Fahrzeugbrand - PKW", "požar osebnega vozila"),
+    ("Fahrzeugbrand - LKW", "požar tovornega vozila"),
+    ("Fahrzeugbrand", "požar vozila"),
+    ("Gefahrenmeldeanlage - Brand", "sprožen požarni javljalnik"),
+    ("Gefahrenmeldeanlage", "javljalnik nevarnosti"),
     ("Kleinbrand - im Freien", "manjši požar na prostem"),
+    ("Kleinbrand", "manjši požar"),
+    ("Rauchentwicklung", "razvoj dima (dimljenje)"),
+    ("Vegetationsbrand - Freifläche", "požar vegetacije na odprtem"),
+    ("Vegetationsbrand", "požar vegetacije"),
     ("Gebäudebrand - Landwirtschaft", "požar kmetijske zgradbe"),
     ("Gebäudebrand - Wohnhaus", "požar stanovanjske hiše"),
     ("Gebäudebrand", "požar zgradbe"),
-    ("Fahrzeugbrand", "požar vozila"),
+    ("Austritt - Betriebsmittel", "iztekanje pogonskih tekočin"),
+    ("Erkundung/Kontrolle", "izvidovanje/pregled"),
+    ("Anforderung - von anderer Organisation", "zahteva druge organizacije (pomoč)"),
+    ("Arbeitseinsatz / Technische Hilfeleistung", "delovna akcija / tehnična pomoč"),
+    ("Technische Hilfeleistung", "tehnična pomoč"),
+    ("Insekteneinsatz", "odstranitev žuželk (sršeni/ose)"),
+    ("Logistikeinsatz", "logistična podpora"),
     ("Wasserversorgung", "oskrba z vodo"),
-    ("Tierrettung", "reševanje živali"),
+    ("Auspumparbeiten", "izčrpavanje vode"),
+    ("Bergung - Arbeitsmaschine", "izvlek delovnega stroja"),
+    ("Bergung - Großfahrzeug", "izvlek velikega vozila"),
+    ("Bergung - Kleinfahrzeug", "izvlek manjšega vozila"),
+    ("Bergung - PKW", "izvlek osebnega vozila"),
+    ("Bergung - LKW", "izvlek tovornega vozila"),
+    ("Bergung PKW", "izvlek osebnega vozila"),
+    ("Bergung", "izvlek/reševanje"),
+    ("Notöffnung - Lift", "nujno odpiranje dvigala"),
     ("Notöffnung - Tür", "nujno odpiranje vrat"),
     ("Notöffnung", "nujno odpiranje"),
-    ("Bergung - PKW", "izvleka osebnega vozila"),
-    ("Bergung - Großfahrzeug", "izvleka velikega vozila"),
-    ("Bergung", "izvleka/reševanje"),
-    ("Menschenrettung - Notlage", "reševanje osebe – nujni primer"),
+    ("Objekt/Baum - Umgestürzt", "podrto drevo/objekt"),
+    ("Tierrettung", "reševanje živali"),
+    ("Verkehrsunfall - Verletzungen", "prometna nesreča s poškodovanimi"),
+    ("Wassergebrechen", "okvara vodovoda / izliv vode"),
+    ("Menschenrettung - Höhe/Tiefe", "reševanje osebe z višine/globine"),
+    ("Menschenrettung - Notlage", "reševanje osebe v stiski"),
     ("Menschenrettung", "reševanje osebe"),
-    ("Austritt - Betriebsmittel", "iztekanje pogonske tekočine"),
-    ("Erkundung/Kontrolle", "izvidovanje/pregled"),
-    ("Anforderung - von anderer Organisation", "zahteva druge organizacije"),
-    ("Übung", "vaja (usposabljanje)"),
-    # Free-text OÖ phrasing.
-    ("Ölspur/Ölaustritt", "sled olja / iztekanje olja"),
-    ("Ölaustritt", "iztekanje olja"),
-    ("Ölspur", "sled olja"),
+    ("Übung", "vaja"),
+    # ── OÖ free-text phrases ──
+    ("Einsatz od. Einsatzübung", "intervencija ali vaja (nerazvrščen alarm)"),
+    ("Einsatzübung", "vaja"),
+    ("Aufzugsdefekt", "okvara dvigala"),
+    ("Baum droht umzustürzen", "drevo grozi, da se podre"),
+    ("Brand Bahndamm", "požar železniškega nasipa"),
+    ("Brand Baumaschine im Freien", "požar gradbenega stroja na prostem"),
+    ("Brand Elektroanlage in Gebäude", "požar električne napeljave v zgradbi"),
+    ("Brand Fahrzeug in Gebäude", "požar vozila v zgradbi"),
+    ("Brand Fassade", "požar fasade"),
+    ("Brand Feld", "požar polja"),
+    ("Brand Fluren", "požar travnikov/njiv"),
+    ("Brand Gebäude mehrstöckig", "požar večnadstropne zgradbe"),
+    ("Brand Gebäude", "požar zgradbe"),
+    ("Brand Gebüsch", "požar grmovja"),
+    ("Brand Gewerbe", "požar obrtnega/industrijskega objekta"),
+    ("Brand Kamin", "požar dimnika"),
+    ("Brand Kübel im Freien", "požar smetnjaka na prostem"),
+    ("Brand PKW im Freien", "požar osebnega vozila na prostem"),
+    ("Brand Schuppen", "požar lope"),
+    ("Brand Wiese", "požar travnika"),
+    ("Brand im Dachbereich", "požar v ostrešju"),
+    ("Brand im Freien", "požar na prostem"),
+    ("Brand landwirtschaftliches Fahrzeug", "požar kmetijskega vozila"),
+    ("Brand landwirtschaftliches Objekt", "požar kmetijskega objekta"),
+    ("Brand unklare Lage", "požar – nejasno stanje"),
     ("Brandmeldealarm", "alarm požarnega javljalnika"),
+    ("Brandmeldetaste Gedrückt", "pritisnjen ročni javljalnik požara"),
+    ("Brandverdacht", "sum požara"),
+    ("Eingeschlossene Person in Lift", "oseba ujeta v dvigalu"),
+    ("Entlaufenes Tier", "pobegla žival"),
+    ("Freimachen von Verkehrswegen", "sprostitev prometnih poti"),
+    ("Gasgeruch wahrnehmbar", "zaznan vonj po plinu"),
+    ("Gasaustritt", "uhajanje plina"),
+    ("Gebäude droht überflutet zu werden", "zgradbi grozi poplava"),
+    ("Keller überflutet", "poplavljena klet"),
+    ("Kohlenmonoxidaustritt", "uhajanje ogljikovega monoksida (CO)"),
+    ("Person eingeklemmt", "ukleščena oseba"),
+    ("Person in misslicher Lage", "oseba v nevarnem položaju"),
+    ("Personenrettung Verkehrsunfall LKW", "reševanje oseb – prometna nesreča s tovornjakom"),
+    ("Personenrettung Verkehrsunfall PKW", "reševanje oseb – prometna nesreča z osebnim vozilom"),
+    ("Personenrettung hoch", "reševanje osebe z višine"),
+    ("Personenrettung", "reševanje oseb"),
+    ("Rettung Kleintier", "reševanje male živali"),
+    ("Sonstiger Einsatz", "druga intervencija"),
+    ("Tragehilfe", "pomoč pri prenosu pacienta (asistenca NMP)"),
+    ("Türöffnung Menschenrettung", "odpiranje vrat – reševanje osebe"),
+    ("Türöffnung Unfallverdacht", "odpiranje vrat – sum nesreče"),
+    ("Türöffnung", "odpiranje vrat"),
     ("Verkehrsunfall Aufräumarbeiten", "čiščenje po prometni nesreči"),
     ("Verkehrsunfall", "prometna nesreča"),
-    ("Brandverdacht", "sum požara"),
-    ("Gasaustritt", "uhajanje plina"),
     ("Wasserschaden", "škoda zaradi vode"),
     ("Sturmschaden", "škoda zaradi neurja"),
-    ("Türöffnung", "odpiranje vrat"),
-    # Generic connective words, applied last so specific phrases above match first.
+    ("ÖWR Einsatz - Defektes Boot auf Gewässer", "vodna reševalna služba – okvarjen čoln"),
+    ("ÖWR Einsatz", "intervencija vodne reševalne službe"),
+    ("Ölaustritt groß", "večje iztekanje olja"),
+    ("Ölspur/Ölaustritt", "sled olja / iztekanje olja"),
+    ("Ölaustritt", "iztekanje olja"),
+    ("Ölspur", "sled olja na cesti"),
+    # ── EMS / helicopter phrasing, when it appears in fire-brigade logs ──
+    ("Hubschrauberlandeplatz", "varovanje pristajališča helikopterja"),
+    ("Hubschrauberlandung", "pristanek reševalnega helikopterja"),
+    ("Notarzthubschrauber", "reševalni helikopter (NMP)"),
+    ("Hubschrauber", "helikopter"),
+    ("Rettungsdienst", "reševalna služba"),
+    ("Notarzt", "zdravnik NMP"),
+    # ── generic connective words, applied last ──
+    ("im Freien", "na prostem"),
     ("Brand", "požar"),
     ("Unfall", "nesreča"),
+    ("Person", "oseba"),
 ]
 
 
 def at_translate(de_text: str) -> str:
-    """Best-effort German→Slovenian gloss over the fixed dispatch vocabulary
-    above. Unmatched words are left in German rather than mistranslated —
-    the point is to make the data legible, not to replace `raw`, which always
-    keeps the untouched German original."""
+    """Best-effort German→Slovenian gloss over the fixed dispatch vocabulary.
+    Unmatched words stay German rather than being mistranslated; `raw`
+    always keeps the untouched German original."""
     out = de_text
     for de, sl in AT_SL_GLOSSARY:
         out = re.sub(re.escape(de), sl, out)
     return out
 
 
+# Category from the German type text. Order matters: the more specific
+# emergency kinds first, so "Personenrettung Verkehrsunfall" lands in
+# accident and "Türöffnung Menschenrettung" in rescue.
 AT_CATCODE = [
-    # (regex over the raw German type text, category)
-    (r"^B\d|Brand(?!sicherheitswache)", "fire"),
-    (r"^S\d|Austritt|Ölspur|Ölaustritt|Gasaustritt", "tech"),
-    (r"^T\d|Bergung|Notöffnung|Wasserversorgung|Menschenrettung|Tierrettung|"
-     r"Türöffnung|Wasserschaden|Sturmschaden", "tech"),
+    (r"^U\d|Übung|Einsatzübung", "exercise"),
+    (r"Hubschrauber|Landeplatz|Notarzt|Tragehilfe|Rettungsdienst", "ems"),
     (r"Verkehrsunfall", "accident"),
-    (r"^SOF|Erkundung|Anforderung", "other"),
+    (r"Menschenrettung|Personenrettung|Person eingeklemmt|Person in misslicher|"
+     r"Eingeschlossene Person|Tierrettung|Rettung Kleintier|Entlaufenes Tier", "rescue"),
+    (r"^B\d|Brand|Rauch", "fire"),
+    (r"^S\d|Austritt|Ölspur|Gasgeruch|Kohlenmonoxid", "tech"),
+    (r"^T\d|Bergung|Notöffnung|Türöffnung|Wasser|Sturm|Baum|Aufzug|Lift|Auspump|"
+     r"überflutet|Insekten|Logistik|Arbeitseinsatz|Freimachen|Technische", "tech"),
+    (r"^SOF|Erkundung|Anforderung|Sonstiger", "other"),
 ]
 
 
 def _at_category(type_text: str) -> str:
+    # Case-insensitive: German compounds bury the keyword mid-word
+    # ("Gasaustritt", "Kohlenmonoxidaustritt"), where a capitalised
+    # "Austritt" would never match.
     for pat, cat in AT_CATCODE:
-        if re.search(pat, type_text):
+        if re.search(pat, type_text, re.I):
             return cat
     return "other"
 
@@ -1429,33 +1530,59 @@ def _at_geocode(town: str, state: str):
     return (lat, lon)
 
 
+def fetch_post(url: str, data: dict, timeout: int = 30):
+    """Plain POST (no conditional-GET machinery). OÖ's exercise toggle is a
+    POST form, and the exercise rows are exactly the ones the console is
+    asked to show, so the poll has to submit it."""
+    body = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8", "Accept-Language": "de,en;q=0.8"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            charset = resp.headers.get_content_charset()
+            for enc in filter(None, (charset, "utf-8", "cp1252")):
+                try:
+                    return raw.decode(enc), "ok"
+                except (UnicodeDecodeError, LookupError):
+                    continue
+            return raw.decode("utf-8", "replace"), "ok"
+    except urllib.error.HTTPError as e:
+        return None, f"error: HTTP {e.code}"
+    except Exception as e:                                        # noqa: BLE001
+        return None, f"error: {type(e).__name__}"
+
+
+_WASTL = "https://www.feuerwehr-krems.at/CodePages/Wastl/WastlMain/"
+_WASTL_ROW = (r">Alarmzentrale</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td>"
+              r"<td[^>]*>(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2}):(\d{2})</td>")
+
+
 def src_at_noe():
     """Niederösterreich (Lower Austria) — the "Wastl" statewide fire dispatch
     system (feuerwehr-krems.at), reached through several nested pages found
     by hand (BFKDO Wiener Neustadt → iframe → Wastl overview → iframe →
-    Land_EinsatzHistorie.asp). Real dispatch log, precise to the second, one
-    entry per unit/district alarm. "Übung" (U-prefix) entries are training
-    exercises, not real incidents — dropped, matching how Croatian sources
-    drop drills and PR content.
+    Land_EinsatzHistorie.asp). Real dispatch log, precise to the second.
+
+    Two lists, no overlap: the history (Land_EinsatzHistorie.asp) holds
+    closed calls with an exact second-precision timestamp; the "currently
+    running" page (Land_EinsatzAktuell.asp) holds the open ones with only a
+    date and a rough duration ("~ 1 std."). A running call is emitted as its
+    own row (time approximated from the duration, ref NOE-LIVE-…); it
+    self-expires once it leaves the running list (prune_supabase_austria
+    drops LIVE rows not re-seen within 40 minutes), and the exact-time
+    history row takes over. Training exercises (U-prefix) are kept and
+    tagged "exercise".
     """
     out = []
-    text, status = fetch(
-        "https://www.feuerwehr-krems.at/CodePages/Wastl/WastlMain/"
-        "Land_EinsatzHistorie.asp?bezirk=&08.09.202600000,00")
+    text, status = fetch(_WASTL + "Land_EinsatzHistorie.asp?bezirk=&vc")
     if text is None:
         return out, status
-    try:
-        html = text if isinstance(text, str) else text.decode("cp1252", "replace")
-    except Exception:                                             # noqa: BLE001
-        html = text
-    rows = re.findall(
-        r">Alarmzentrale</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td>"
-        r"<td[^>]*>(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2}):(\d{2})</td>", html)
-    cutoff = (datetime.now(CEST) - timedelta(days=AT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
-    for town, typ, dd, mo, yy, hh, mi, ss in rows:
+    now = datetime.now(CEST)
+    cutoff = (now - timedelta(days=AT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    for town, typ, dd, mo, yy, hh, mi, ss in re.findall(_WASTL_ROW, text):
         town, typ = tidy(town), tidy(typ)
-        if typ.startswith(("U0", "U1", "U2", "U")):
-            continue                                             # training exercise, not real
         date = f"{yy}-{mo}-{dd}"
         if date < cutoff:
             continue
@@ -1464,49 +1591,84 @@ def src_at_noe():
             "id": rowid("AT-NOE", date, f"{hh}:{mi}", town + typ),
             "source": "NÖ Feuerwehr · Wastl", "region": "noe", "country": "AT",
             "ref": f"NOE-{mo}{dd}-{hh}{mi}{ss}", "date": date, "time": f"{hh}:{mi}",
-            "category": _at_category(typ), "title": at_translate(typ),
+            "category": _at_category(typ), "title": at_translate(typ), "status": "closed",
             "location": town, "lat": lat, "lon": lon,
             "units": "Feuerwehr " + town, "crew": None, "vehicles": None,
-            "raw": typ, "link": "https://www.feuerwehr-krems.at/CodePages/Wastl/WastlMain/ShowOverview.asp",
+            "raw": typ, "link": _WASTL + "ShowOverview.asp",
+        })
+    live, _ = fetch(_WASTL + "Land_EinsatzAktuell.asp?vc")
+    for town, typ, when in re.findall(
+            r">Alarmzentrale</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td>",
+            live or ""):
+        town, typ = tidy(town), tidy(typ)
+        m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})\s*~\s*(\d+)\s*(std|min)", when, re.I)
+        if not m:
+            continue
+        dd, mo, yy, n, unit = m.groups()
+        started = now - timedelta(hours=int(n)) if unit.lower().startswith("std") else now - timedelta(minutes=int(n))
+        date = f"{yy}-{mo}-{dd}"
+        lat, lon = _at_geocode(town, "Niederösterreich")
+        out.append({
+            "id": rowid("AT-NOE-LIVE", date, "", town + typ),
+            "source": "NÖ Feuerwehr · Wastl", "region": "noe", "country": "AT",
+            "ref": f"NOE-LIVE-{mo}{dd}", "date": date, "time": started.strftime("%H:%M"),
+            "category": _at_category(typ), "title": at_translate(typ), "status": "active",
+            "location": town, "lat": lat, "lon": lon,
+            "units": "Feuerwehr " + town, "crew": None, "vehicles": None,
+            "raw": f"{typ} (v teku ~{n} {'h' if unit.lower().startswith('std') else 'min'})",
+            "link": _WASTL + "ShowOverview.asp",
         })
     return out, status
 
 
+_OOE_ROW = re.compile(
+    r'<td style="background-color: (\w+)">&nbsp;</td><td[^>]*><b>([^<]+)</b>\s*'
+    r'\(<a title="([^"]+)">(\w+)</a>\):\s*([^<]+)<br>\s*<small><ul>(.*?)</ul></small>', re.S)
+_OOE_UNIT = re.compile(
+    r'<li>([^:<]+):&nbsp;(\d{2})\.(\d{2})\.\s*(\d{2}):(\d{2})(?:&nbsp;&ndash;&nbsp;(\d{2}):(\d{2}))?')
+
+
 def src_at_ooe():
     """Oberösterreich (Upper Austria) — the state fire-brigade association's
-    own live operations page (einsaetze.ooelfv.at). Server-rendered table:
-    town, district, incident type, one or more responding brigades each with
-    their own alert time — the earliest time is used as the call's dojava.
+    own live operations page (einsaetze.ooelfv.at). The 2-day view, with the
+    exercise toggle submitted (a POST form), which is what makes the "Einsatz
+    od. Einsatzübung" rows appear — the unconfirmed alarm-or-exercise calls
+    the page hides by default. Each responding brigade carries its own alert
+    time and, once released, an end time: a call is closed when every unit
+    has one, otherwise still active. Earliest alert time is the call's time.
     """
     out = []
-    text, status = fetch("https://einsaetze.ooelfv.at/")
+    text, status = fetch_post("https://einsaetze.ooelfv.at/einsatz/2tage",
+                              {"exercise": "Y", "bezirk": "-1"})
     if text is None:
         return out, status
-    cutoff = (datetime.now(CEST) - timedelta(days=AT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
-    for m in re.finditer(
-            r'<b>([^<]+)</b>\s*\(<a title="([^"]+)">(\w+)</a>\):\s*([^<]+)<br>'
-            r'<small><ul>(.*?)</ul></small>', text, re.S):
-        town, district, _abbr, typ, unit_block = m.groups()
+    now = datetime.now(CEST)
+    cutoff = (now - timedelta(days=AT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    for colour, town, district, _abbr, typ, unit_block in _OOE_ROW.findall(text):
         town, typ = tidy(town), tidy(typ)
-        times = re.findall(r'<li>([^:]+):&nbsp;(\d{2})\.(\d{2})\.\s*(\d{2}):(\d{2})', unit_block)
-        if not times:
+        units = _OOE_UNIT.findall(unit_block)
+        if not units:
             continue
-        # Earliest-alerted unit is the actual call time; others joined in later.
-        unit0, dd, mo, hh, mi = min(times, key=lambda t: (t[3], t[4]))
-        units = ", ".join(tidy(t[0]) for t in times)
-        yy = datetime.now(CEST).year
-        date = f"{yy}-{mo}-{dd}"
+        first = min(units, key=lambda u: (u[2], u[1], u[3], u[4]))       # earliest alert
+        _u, dd, mo, hh, mi, _eh, _em = first
+        year = now.year - (1 if int(mo) > now.month else 0)               # year-end wrap
+        date = f"{year}-{mo}-{dd}"
         if date < cutoff:
             continue
-        lat, lon = _at_geocode(town, district)
+        closed = all(u[5] for u in units)
+        lat, lon = _at_geocode(town, "Oberösterreich")
+        cat = _at_category(typ)
+        if colour == "grey" and cat == "other":
+            cat = "exercise"
         out.append({
             "id": rowid("AT-OOE", date, f"{hh}:{mi}", town + typ),
             "source": "OÖ Feuerwehr · LFV", "region": "ooe", "country": "AT",
             "ref": f"OOE-{mo}{dd}-{hh}{mi}", "date": date, "time": f"{hh}:{mi}",
-            "category": _at_category(typ), "title": at_translate(typ),
+            "category": cat, "title": at_translate(typ),
+            "status": "closed" if closed else "active",
             "location": f"{town} ({district})", "lat": lat, "lon": lon,
-            "units": units, "crew": None, "vehicles": None,
-            "raw": typ, "link": "https://einsaetze.ooelfv.at/",
+            "units": ", ".join(tidy(u[0]) for u in units), "crew": None, "vehicles": len(units),
+            "raw": typ, "link": "https://einsaetze.ooelfv.at/einsatz/2tage",
         })
     return out, status
 
