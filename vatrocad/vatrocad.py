@@ -1343,8 +1343,21 @@ def src_zvoc_sibenik():
     for i in range(1, len(blocks) - 2, 3):
         d, t, body = blocks[i], blocks[i + 1], blocks[i + 2]
         day, mon, yr = d.split(".")
-        for j, item in enumerate(re.findall(r"^\s*-\s*(.+)$", body, re.M)):
-            item = tidy(item)
+        entries = [(tidy(x), None) for x in re.findall(r"^\s*-\s*(.+)$", body, re.M)]
+        # Two kinds of bulletin share the header. The twelve-hour digest lists
+        # "- " items; the ad-hoc "Priopćenje o požaru" flash (posted hourly while
+        # a big fire runs: "na terenu se nalazi 35 vatrogasaca i 15 vozila,
+        # sudjeluju i zračne snage") is one paragraph with no bullets at all —
+        # and was being skipped wholesale. Treat that paragraph as the event,
+        # timed at the bulletin's own stamp. The page renders each bulletin
+        # twice (card + modal); the card copy reduces to "h OPŠIRNIJE" and is
+        # dropped by the length check, the modal copy carries the text.
+        if not entries:
+            narr = tidy(re.sub(r"\bOPŠIRNIJE\b|^\s*h\b", " ", body))
+            narr = re.sub(r"^(?:Priopćenje o [\wšđčćž]+\s*)+", "", narr).strip()
+            if len(narr) >= 40:
+                entries = [(narr, "flash")]
+        for j, (item, kind) in enumerate(entries):
             if len(item) < 20:
                 continue
             tm = re.search(r"(?:zaprimljena|dojava)[^\d]{0,20}(\d{1,2}:\d{2})", item)
@@ -1357,11 +1370,19 @@ def src_zvoc_sibenik():
             # bulletin date so an already-stored row is corrected, not doubled.
             idate, it = (event_when(f"{yr}-{mon}-{day}", t, hhmm(tm.group(1)))
                          if tm else (f"{yr}-{mon}-{day}", t))
+            # A flash bulletin describes the scene as it is: crews "na terenu" /
+            # "u tijeku" means still running unless it says extinguished.
+            fstatus = None
+            if kind == "flash":
+                fstatus = ("closed" if re.search(r"ugašen|završen", item, re.I)
+                           else "contained" if re.search(r"lokaliziran|pod kontrolom", item, re.I)
+                           else "active" if re.search(r"na terenu|u tijeku|traje|sudjeluj", item, re.I)
+                           else None)
             out.append({
                 "id": rowid("ŽVOC Šibenik-Knin", f"{yr}-{mon}-{day}", it, item),
                 "source": "ŽVOC Šibenik-Knin", "region": "sib",
-                "ref": f"ŽV-{day}{mon}-{j+1}",
-                "date": idate, "time": it,
+                "ref": f"ŽV-{day}{mon}-{'F' if kind == 'flash' else j+1}",
+                "date": idate, "time": it, "status": fstatus,
                 "category": categorise(item), "title": summarise(item),
                 "location": place_label(item) or "Šibenik-Knin", "lat": lat, "lon": lon,
                 "units": ", ".join(units), "crew": int(crew.group(1)) if crew else None,
