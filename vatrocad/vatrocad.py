@@ -103,6 +103,7 @@ def push_supabase(rows):
         blob = f"{r.get('title', '')} {r.get('raw', '')}"
         payload.append({
             "id": r["id"], "source": r["source"], "region": r.get("region"),
+            "country": r.get("country", "HR"),
             "ref": r.get("ref"), "occurred": r.get("date") or None,
             "occurred_time": r.get("time") or None, "ts": to_ts(r.get("date", ""), r.get("time", "")),
             "category": r.get("category"), "status": status_of(blob),
@@ -123,6 +124,28 @@ def push_supabase(rows):
             return f"pushed {len(payload)} ({resp.status})" + (f", {dupes} in-batch dupes dropped" if dupes else "")
     except urllib.error.HTTPError as e:
         return f"error: HTTP {e.code} {e.read()[:400].decode('utf-8', 'replace')}"
+    except Exception as e:                                        # noqa: BLE001
+        return f"error: {type(e).__name__}"
+
+
+def prune_supabase_austria(days=MAX_AGE_DAYS):
+    """Austria's retention rule is stricter than Croatia's: actually DELETE
+    rows older than `days`, not just hide them client-side. Croatia's archive
+    stays forever by design (the README documents that intentionally); this
+    is a deliberately different, narrower rule scoped to country=AT only.
+    Never raises — a failed prune must not stop polling."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return "off"
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    url = f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&occurred=lt.{cutoff}"
+    req = urllib.request.Request(url, method="DELETE", headers={
+        "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Prefer": "return=minimal"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return f"pruned ({resp.status})"
+    except urllib.error.HTTPError as e:
+        return f"error: HTTP {e.code} {e.read()[:300].decode('utf-8', 'replace')}"
     except Exception as e:                                        # noqa: BLE001
         return f"error: {type(e).__name__}"
 
@@ -409,14 +432,19 @@ NOMINATIM_MAX_PER_CYCLE = 25     # bounds one poll's worst-case added wall time 
 _nominatim_last_call = [0.0]
 
 
-def _nominatim_lookup(query: str):
-    """One rate-limited Nominatim call. Never raises; returns (lat, lon) or None."""
+def _nominatim_lookup(query: str, countrycodes: str = "hr"):
+    """One rate-limited Nominatim call. Never raises; returns (lat, lon) or None.
+    `countrycodes` defaults to Croatia (the original street-refinement use);
+    Austrian callers pass "at" — without this, a Croatia-only filter silently
+    empties every Austrian result rather than erroring, which is exactly what
+    happened on first wiring this up: geocoding "succeeded" with None every
+    time, no error, no hint why."""
     wait = _nominatim_last_call[0] + 1.1 - time.time()
     if wait > 0:
         time.sleep(wait)
     _nominatim_last_call[0] = time.time()
-    url = ("https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=hr&q="
-           + urllib.parse.quote(query))
+    url = (f"https://nominatim.openstreetmap.org/search?format=json&limit=1"
+           f"&countrycodes={countrycodes}&q=" + urllib.parse.quote(query))
     req = urllib.request.Request(url, headers={"User-Agent": NOMINATIM_UA})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -452,9 +480,14 @@ def refine_locations(conn, rows):
             hit = _nominatim_lookup(f"{street}, {r['location']}, Hrvatska")
             budget -= 1
             lat, lon = hit if hit else (None, None)
-            with conn:
-                conn.execute("INSERT OR IGNORE INTO geocode_cache(q, lat, lon) VALUES(?,?,?)",
-                             (cache_key, lat, lon))
+            # Only cache a real hit. A miss here is often just a transient
+            # network hiccup, not a genuinely unfindable street — caching it
+            # would silently stick that street at the settlement fallback
+            # forever instead of trying again next cycle.
+            if lat is not None:
+                with conn:
+                    conn.execute("INSERT OR IGNORE INTO geocode_cache(q, lat, lon) VALUES(?,?,?)",
+                                 (cache_key, lat, lon))
         if lat is None:
             continue
         # A street "hit" far from the settlement centroid is a bad match (a
@@ -1279,6 +1312,205 @@ def src_hac():
     return out, status
 
 
+# ==========================================================================
+# Austria — Oberösterreich (Upper Austria) and Niederösterreich (Lower
+# Austria) state fire-brigade dispatch systems. A second country, added
+# deliberately narrower than Croatia: no map, no forever-archive — a live
+# feed only, pruned to AT_MAX_AGE_DAYS by an actual delete (see
+# prune_supabase_austria), not just hidden client-side the way Croatia's
+# older-than-3-days rows still sit in the database.
+#
+# Both systems are real state fire-command dispatch logs, server-rendered,
+# no auth, no JS needed — genuinely live, minute-to-second precision. Verified
+# manually against the running services before wiring in.
+# ==========================================================================
+AT_MAX_AGE_DAYS = 3
+
+# German → Slovenian glossary for the fixed, small vocabulary these two
+# systems actually use. This is a phrase glossary, not a general translator:
+# longest phrases match first, and anything not in the list is left in
+# German rather than guessed at — the original German always survives
+# untouched in `raw` regardless, so nothing is ever lost, only clarified.
+AT_SL_GLOSSARY = [
+    # Fixed NÖ type-code phrases, longest/most specific first.
+    ("Brandsicherheitswache", "gasilska požarna straža"),
+    ("Kleinbrand - im Freien", "manjši požar na prostem"),
+    ("Gebäudebrand - Landwirtschaft", "požar kmetijske zgradbe"),
+    ("Gebäudebrand - Wohnhaus", "požar stanovanjske hiše"),
+    ("Gebäudebrand", "požar zgradbe"),
+    ("Fahrzeugbrand", "požar vozila"),
+    ("Wasserversorgung", "oskrba z vodo"),
+    ("Tierrettung", "reševanje živali"),
+    ("Notöffnung - Tür", "nujno odpiranje vrat"),
+    ("Notöffnung", "nujno odpiranje"),
+    ("Bergung - PKW", "izvleka osebnega vozila"),
+    ("Bergung - Großfahrzeug", "izvleka velikega vozila"),
+    ("Bergung", "izvleka/reševanje"),
+    ("Menschenrettung - Notlage", "reševanje osebe – nujni primer"),
+    ("Menschenrettung", "reševanje osebe"),
+    ("Austritt - Betriebsmittel", "iztekanje pogonske tekočine"),
+    ("Erkundung/Kontrolle", "izvidovanje/pregled"),
+    ("Anforderung - von anderer Organisation", "zahteva druge organizacije"),
+    ("Übung", "vaja (usposabljanje)"),
+    # Free-text OÖ phrasing.
+    ("Ölspur/Ölaustritt", "sled olja / iztekanje olja"),
+    ("Ölaustritt", "iztekanje olja"),
+    ("Ölspur", "sled olja"),
+    ("Brandmeldealarm", "alarm požarnega javljalnika"),
+    ("Verkehrsunfall Aufräumarbeiten", "čiščenje po prometni nesreči"),
+    ("Verkehrsunfall", "prometna nesreča"),
+    ("Brandverdacht", "sum požara"),
+    ("Gasaustritt", "uhajanje plina"),
+    ("Wasserschaden", "škoda zaradi vode"),
+    ("Sturmschaden", "škoda zaradi neurja"),
+    ("Türöffnung", "odpiranje vrat"),
+    # Generic connective words, applied last so specific phrases above match first.
+    ("Brand", "požar"),
+    ("Unfall", "nesreča"),
+]
+
+
+def at_translate(de_text: str) -> str:
+    """Best-effort German→Slovenian gloss over the fixed dispatch vocabulary
+    above. Unmatched words are left in German rather than mistranslated —
+    the point is to make the data legible, not to replace `raw`, which always
+    keeps the untouched German original."""
+    out = de_text
+    for de, sl in AT_SL_GLOSSARY:
+        out = re.sub(re.escape(de), sl, out)
+    return out
+
+
+AT_CATCODE = [
+    # (regex over the raw German type text, category)
+    (r"^B\d|Brand(?!sicherheitswache)", "fire"),
+    (r"^S\d|Austritt|Ölspur|Ölaustritt|Gasaustritt", "tech"),
+    (r"^T\d|Bergung|Notöffnung|Wasserversorgung|Menschenrettung|Tierrettung|"
+     r"Türöffnung|Wasserschaden|Sturmschaden", "tech"),
+    (r"Verkehrsunfall", "accident"),
+    (r"^SOF|Erkundung|Anforderung", "other"),
+]
+
+
+def _at_category(type_text: str) -> str:
+    for pat, cat in AT_CATCODE:
+        if re.search(pat, type_text):
+            return cat
+    return "other"
+
+
+_at_geocode_conn = None    # lazily-opened connection, reused for the process's life
+
+
+def _at_geocode(town: str, state: str):
+    """Reuse the Croatian-street-level Nominatim pipeline for Austrian towns —
+    same rate limit, same persistent geocode_cache table (so a recurring town
+    is never re-geocoded across polls — NÖ alone repeats the same handful of
+    towns dozens of times a day), just a different query string and country
+    filter. Never geocoded against the Croatian PLACES gazetteer, which is
+    HR-only."""
+    global _at_geocode_conn
+    if _at_geocode_conn is None:
+        _at_geocode_conn = db()
+    key = f"AT|{town}|{state}"
+    row = _at_geocode_conn.execute(
+        "SELECT lat, lon FROM geocode_cache WHERE q=?", (key,)).fetchone()
+    if row is not None:
+        return (row["lat"], row["lon"]) if row["lat"] is not None else (None, None)
+    hit = _nominatim_lookup(f"{town}, {state}, Österreich", countrycodes="at")
+    lat, lon = hit if hit else (None, None)
+    # Only cache a real hit — a miss is often a transient network blip, not a
+    # genuinely unfindable town, and caching it would strand that town
+    # unlocated forever instead of retrying on the next poll.
+    if lat is not None:
+        with _at_geocode_conn:
+            _at_geocode_conn.execute(
+                "INSERT OR IGNORE INTO geocode_cache(q, lat, lon) VALUES(?,?,?)", (key, lat, lon))
+    return (lat, lon)
+
+
+def src_at_noe():
+    """Niederösterreich (Lower Austria) — the "Wastl" statewide fire dispatch
+    system (feuerwehr-krems.at), reached through several nested pages found
+    by hand (BFKDO Wiener Neustadt → iframe → Wastl overview → iframe →
+    Land_EinsatzHistorie.asp). Real dispatch log, precise to the second, one
+    entry per unit/district alarm. "Übung" (U-prefix) entries are training
+    exercises, not real incidents — dropped, matching how Croatian sources
+    drop drills and PR content.
+    """
+    out = []
+    text, status = fetch(
+        "https://www.feuerwehr-krems.at/CodePages/Wastl/WastlMain/"
+        "Land_EinsatzHistorie.asp?bezirk=&08.09.202600000,00")
+    if text is None:
+        return out, status
+    try:
+        html = text if isinstance(text, str) else text.decode("cp1252", "replace")
+    except Exception:                                             # noqa: BLE001
+        html = text
+    rows = re.findall(
+        r">Alarmzentrale</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td>"
+        r"<td[^>]*>(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2}):(\d{2})</td>", html)
+    cutoff = (datetime.now(CEST) - timedelta(days=AT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    for town, typ, dd, mo, yy, hh, mi, ss in rows:
+        town, typ = tidy(town), tidy(typ)
+        if typ.startswith(("U0", "U1", "U2", "U")):
+            continue                                             # training exercise, not real
+        date = f"{yy}-{mo}-{dd}"
+        if date < cutoff:
+            continue
+        lat, lon = _at_geocode(town, "Niederösterreich")
+        out.append({
+            "id": rowid("AT-NOE", date, f"{hh}:{mi}", town + typ),
+            "source": "NÖ Feuerwehr · Wastl", "region": "noe", "country": "AT",
+            "ref": f"NOE-{mo}{dd}-{hh}{mi}{ss}", "date": date, "time": f"{hh}:{mi}",
+            "category": _at_category(typ), "title": at_translate(typ),
+            "location": town, "lat": lat, "lon": lon,
+            "units": "Feuerwehr " + town, "crew": None, "vehicles": None,
+            "raw": typ, "link": "https://www.feuerwehr-krems.at/CodePages/Wastl/WastlMain/ShowOverview.asp",
+        })
+    return out, status
+
+
+def src_at_ooe():
+    """Oberösterreich (Upper Austria) — the state fire-brigade association's
+    own live operations page (einsaetze.ooelfv.at). Server-rendered table:
+    town, district, incident type, one or more responding brigades each with
+    their own alert time — the earliest time is used as the call's dojava.
+    """
+    out = []
+    text, status = fetch("https://einsaetze.ooelfv.at/")
+    if text is None:
+        return out, status
+    cutoff = (datetime.now(CEST) - timedelta(days=AT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    for m in re.finditer(
+            r'<b>([^<]+)</b>\s*\(<a title="([^"]+)">(\w+)</a>\):\s*([^<]+)<br>'
+            r'<small><ul>(.*?)</ul></small>', text, re.S):
+        town, district, _abbr, typ, unit_block = m.groups()
+        town, typ = tidy(town), tidy(typ)
+        times = re.findall(r'<li>([^:]+):&nbsp;(\d{2})\.(\d{2})\.\s*(\d{2}):(\d{2})', unit_block)
+        if not times:
+            continue
+        # Earliest-alerted unit is the actual call time; others joined in later.
+        unit0, dd, mo, hh, mi = min(times, key=lambda t: (t[3], t[4]))
+        units = ", ".join(tidy(t[0]) for t in times)
+        yy = datetime.now(CEST).year
+        date = f"{yy}-{mo}-{dd}"
+        if date < cutoff:
+            continue
+        lat, lon = _at_geocode(town, district)
+        out.append({
+            "id": rowid("AT-OOE", date, f"{hh}:{mi}", town + typ),
+            "source": "OÖ Feuerwehr · LFV", "region": "ooe", "country": "AT",
+            "ref": f"OOE-{mo}{dd}-{hh}{mi}", "date": date, "time": f"{hh}:{mi}",
+            "category": _at_category(typ), "title": at_translate(typ),
+            "location": f"{town} ({district})", "lat": lat, "lon": lon,
+            "units": units, "crew": None, "vehicles": None,
+            "raw": typ, "link": "https://einsaetze.ooelfv.at/",
+        })
+    return out, status
+
+
 def place_label(text: str):
     scrubbed = UNIT_RE.sub(" ", text)
     for m in LOC_PHRASE.finditer(scrubbed):
@@ -1337,6 +1569,8 @@ SOURCES = [
     ("HVZ · DVOC 193",    src_dvoc_national, "HTML national digest"),
     ("HGSS · spašavanje", src_hgss,          "RSS · mountain rescue"),
     ("HAC · autoceste",   src_hac,           "HTML, national motorway network"),
+    ("NÖ Feuerwehr · Wastl", src_at_noe,      "HTML, Lower Austria state dispatch"),
+    ("OÖ Feuerwehr · LFV", src_at_ooe,        "HTML, Upper Austria state dispatch"),
     ("Meteoalarm",        src_meteoalarm,    "CAP 1.2 Atom feed"),
 ]
 
@@ -1435,6 +1669,12 @@ def poll_once(conn, verbose=True):
     sb = push_supabase(all_rows)
     if verbose and sb != "off":
         print(f"  {'→ Supabase':22s} {sb}")
+    # Austria's retention rule is narrower than Croatia's: actually delete
+    # anything past AT_MAX_AGE_DAYS, every cycle, rather than keep a forever
+    # archive. Runs after the push so nothing is deleted before it lands.
+    pr = prune_supabase_austria()
+    if verbose and pr != "off":
+        print(f"  {'→ AT prune':22s} {pr}")
     return total_new
 
 
