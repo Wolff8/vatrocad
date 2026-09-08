@@ -516,6 +516,8 @@ PLACES = {
     # Split-Dalmatia (dalmacijadanas) + Sisak-Moslavina (sisak.info) newsroom feeds
     "vrgorac": (43.204, 17.375), "hvar": (43.172, 16.443), "brač": (43.320, 16.630),
     "supetar": (43.383, 16.552), "vis": (43.061, 16.183), "dugopolje": (43.573, 16.606),
+    "garčin": (45.164, 18.223), "valpovo": (45.659, 18.417), "nerežišća": (43.331, 16.581),
+    "pučišća": (43.348, 16.727), "tenja": (45.497, 18.747),
     "klis": (43.562, 16.523), "podstrana": (43.478, 16.548), "stobreč": (43.505, 16.530),
     "tučepi": (43.267, 17.055), "baška voda": (43.358, 16.948), "trilj": (43.622, 16.727),
     "vrlika": (43.905, 16.398), "hrvace": (43.735, 16.633), "otok": (43.605, 16.703),
@@ -1063,6 +1065,20 @@ NEWSROOMS = [
      "varaždin", "vza", False),
     ("ICV · kronika", "vpz", "https://www.icv.hr/vijesti/crna-kronika/feed/",
      "virovitica", "icv", False),
+    # Brigades' own per-call logs, found by scanning 8,567 candidate domains
+    # (dvd-/jvp-/vatrogasci- × every Croatian city and municipality): 115 live
+    # brigade sites, of which exactly these still post interventions in 2026.
+    # The rest are statistics pages or logs that stopped in 2015-2025, and the
+    # HVZ shared CMS (spis.hvz.hr) that hosts hundreds of DVDs is geo-fenced.
+    ("DVD Supetar · intervencije", "sdz", "https://vatrogasci-supetar.hr/category/intervencije/feed/",
+     "supetar", "sup", False),
+    ("DVD Garčin · intervencije", "bpz", "https://dvdgarcin.hr/category/intervencije/feed/",
+     "garčin", "gar", False),
+    ("DVD Valpovo · intervencije", "obz", "https://dvd-valpovo.hr/category/intervencije/feed/",
+     "valpovo", "val", False),
+    # JVP Osijek: the category feed is disabled (404) but the query form works.
+    ("JVP Osijek · intervencije", "obz", "https://vatrogasci-osijek.hr/?cat=3&feed=rss2",
+     "osijek", "jvo", False),
 ]
 
 
@@ -1096,9 +1112,17 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
             date, t = dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
             # An hour named inside the story beats the publication hour — but a
             # piece filed at 08:15 that names 21:40 is reporting last night.
-            tm = re.search(r"\b(?:oko|u)\s+(\d{1,2})[:.](\d{2})\s*(?:sati|h\b)", body)
+            tm = (re.search(r"\b(?:oko|u)\s+(\d{1,2})[:.](\d{2})\s*(?:sati|h\b)", body)
+                  or re.search(r"Vrijeme dojave:\s*(\d{1,2})[:.](\d{2})", body))
             if tm:
                 date, t = event_when(date, t, f"{int(tm.group(1)):02d}:{tm.group(2)}")
+            # Brigade logs posted in a batch ("Datum: 17.01.2026.") name the
+            # call's own date; that beats the publication day outright.
+            dm = re.search(r"\bDatum:\s*(\d{1,2})\.\s?(\d{1,2})\.\s?(\d{4})", body)
+            if dm:
+                cand = f"{dm.group(3)}-{int(dm.group(2)):02d}-{int(dm.group(1)):02d}"
+                if cand <= date:
+                    date = cand
             lead = re.match(r"^([A-ZŠĐČĆŽ][A-ZŠĐČĆŽ\s]{2,28}?)\s+[A-ZŠĐČĆŽ][a-zšđčćž]",
                             title) if caps_lead else None
             lat, lon = geocode((lead.group(1) + " " if lead else "") + blob)
