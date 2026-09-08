@@ -1135,6 +1135,11 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
             cat = categorise(body, title)
             if cat not in ("fire", "accident", "tech", "ems", "rescue"):
                 continue
+            # National feeds carry everything; there the headline itself must
+            # name the incident, or a waste-audit story that mentions "sanacija"
+            # in its body slips in as a call.
+            if region is None and _cat(title.lower()) is None:
+                continue
             pub = it.findtext("pubDate") or ""
             try:
                 dt = datetime.strptime(pub[5:25].strip(), "%d %b %Y %H:%M:%S")
