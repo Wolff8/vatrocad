@@ -678,7 +678,8 @@ function srcTiers(){
 function syncHeader(){
   const mode=rtStatus==="live"?"v živo":rtStatus==="polling"?"osveževanje":rtStatus==="offline"?"ni povezave":"povezujem…";
   $("feedtxt").textContent=`${mode}${lastSync?" · "+cestHM(lastSync):""}`;
-  $("feedt").textContent=lastChange?` · zadnja sprememba ${cestHM(lastChange)}`:"";
+  $("feedt").textContent=(lastChange?` · zadnja sprememba ${cestHM(lastChange)}`:"")
+    +(CTRL?(runnerUp()?" · pobiralnik teče":" · pobiralnik miruje"):"");
   $("feedled").classList.toggle("b",rtStatus==="offline"); $("feedled").classList.toggle("p",rtStatus==="polling"||rtStatus==="connecting");
 }
 
@@ -697,6 +698,26 @@ function rebuild(){
 
 // ── Data: REST load, cheap head check, realtime, tab-return resync ───────────
 let maxSeen="";
+// The control row is how the page and the running poller talk: the page stamps
+// a request through the request_poll() RPC, the poller (a long-lived GitHub job)
+// notices within ~15 s, scrapes, and writes back when it finished. No credential
+// beyond the read-only publishable key ever reaches the browser.
+let CTRL=null;
+async function sbPath(path){
+  const r=await fetch(`${SB_URL}/rest/v1/${path}`,{headers:{apikey:SB_KEY,Authorization:`Bearer ${SB_KEY}`},cache:"no-store"});
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  return r.json();
+}
+const readControl=()=>sbPath("control?id=eq.1&select=*").then(r=>r[0]||null).catch(()=>null);
+async function requestPoll(){
+  const r=await fetch(`${SB_URL}/rest/v1/rpc/request_poll`,{method:"POST",
+    headers:{apikey:SB_KEY,Authorization:`Bearer ${SB_KEY}`,"Content-Type":"application/json"},
+    body:"{}",cache:"no-store"});
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  return r.json();
+}
+const runnerUp=()=>!!(CTRL&&CTRL.runner_until&&new Date(CTRL.runner_until).getTime()>Date.now());
+
 async function sbGet(q){
   const r=await fetch(`${SB_URL}/rest/v1/incidents?${q}`,{headers:{apikey:SB_KEY,Authorization:`Bearer ${SB_KEY}`},cache:"no-store"});
   if(!r.ok) throw new Error("HTTP "+r.status); return r.json();
@@ -724,6 +745,7 @@ async function load(opts={}){
 // This is what makes the board move even when the websocket looks alive but silently dropped (iOS background).
 async function headCheck(){
   try{ const r=await sbGet("select=last_seen&order=last_seen.desc.nullslast&limit=1"); const ls=r[0]?.last_seen||"";
+    CTRL=await readControl();
     if(ls&&ls>maxSeen) await load(); else { lastSync=Date.now(); syncHeader(); } }catch(e){}
 }
 function startRealtime(){
@@ -738,12 +760,35 @@ function startRealtime(){
       else if(rtStatus==="live"&&(status==="CHANNEL_ERROR"||status==="TIMED_OUT"||status==="CLOSED")){ rtStatus="polling"; syncHeader(); }
     });
 }
+// One tap does both halves of "refresh": re-read what the poller has already
+// collected (instant), and ask it to go out to the sources again (~15-60 s),
+// re-reading once that lands.
 $("refresh").addEventListener("click",async()=>{
   const b=$("refresh"); if(b.classList.contains("spin")) return;
-  b.classList.add("spin"); toast("Osvežujem…");
+  b.classList.add("spin");
   try{
-    const {added}=await load({quiet:true});
-    toast(added? `+${added} novih · skupaj ${ROWS.size}` : `Ni novega · ${ROWS.size} vrstic · ${cestHM(Date.now())}`);
+    const first=await load({quiet:true});
+    const before=await readControl(); CTRL=before;
+    let asked=true;
+    try{ await requestPoll(); }catch(e){ asked=false; }
+    if(!asked||!runnerUp()){
+      toast(first.added? `+${first.added} novih · skupaj ${ROWS.size}`
+                       : `Osveženo · ${ROWS.size} vrstic${runnerUp()?"":" · pobiralnik trenutno ne teče"}`);
+      return;
+    }
+    toast(first.added? `+${first.added} novih · pobiram s virov…` : "Pobiram s virov…");
+    const prevFin=before?.poll_finished_at||"";
+    const t0=Date.now();
+    while(Date.now()-t0<180000){
+      await new Promise(r=>setTimeout(r,3000));
+      const c=await readControl(); if(c) CTRL=c;
+      if(c&&(c.poll_finished_at||"")>prevFin){
+        const res=await load({quiet:true});
+        toast(res.added? `+${res.added} novih intervencij` : `Sveže s virov · ni novega · ${ROWS.size} vrstic`);
+        return;
+      }
+    }
+    toast("Pobiralnik se ne odziva · prikazani so zadnji shranjeni podatki");
   }catch(e){ toast("Napaka pri osveževanju"); }
   finally{ b.classList.remove("spin"); }
 });

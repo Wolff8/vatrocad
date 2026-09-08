@@ -263,6 +263,79 @@ def defuture(rows) -> int:
     return fixed
 
 
+def _sb_request(path: str, method: str = "GET", body=None, timeout: int = 25):
+    """Small PostgREST helper for the control row (service-role key)."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return None
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/{path}", data=data, method=method,
+        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                 "Content-Type": "application/json", "Prefer": "return=representation"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else []
+    except Exception:                                             # noqa: BLE001
+        return None
+
+
+def control_read():
+    """Current control row, or None when Supabase is unconfigured/unreachable."""
+    rows = _sb_request("control?id=eq.1&select=*")
+    return rows[0] if rows else None
+
+
+def control_write(**fields):
+    if fields:
+        _sb_request("control?id=eq.1", "PATCH", fields)
+
+
+def serve_loop(conn, minutes: int, interval: int = 900, verbose: bool = True):
+    """Run as a long-lived poller for `minutes`, then exit.
+
+    Why this exists: GitHub's cron is best-effort and was dropping most of the
+    */15 slots — the console looked frozen for hours because nothing was
+    scraping, not because the sources were quiet. One hourly job that stays up
+    and polls on its own clock is honoured reliably, and while it is up the
+    dashboard can ask for an immediate poll by stamping control.poll_requested_at
+    (public.request_poll()), which we notice within ~15 seconds. No credentials
+    ever leave the runner for that: the page only stamps a request."""
+    deadline = time.time() + minutes * 60
+    handled = None                     # newest request stamp already acted on
+    last_poll = 0.0
+    while True:
+        row = control_read() or {}
+        req = row.get("poll_requested_at")
+        manual = bool(req and req != handled and time.time() - last_poll > 45)
+        due = time.time() - last_poll >= interval
+        if manual or last_poll == 0.0 or due:
+            handled = req if manual else handled
+            control_write(poll_started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                          runner_until=datetime.fromtimestamp(deadline, timezone.utc).isoformat(timespec="seconds"),
+                          note="pobiram s virov…")
+            why = "manual" if manual else ("first" if last_poll == 0.0 else "scheduled")
+            if verbose:
+                print(f"[{datetime.now(CEST):%H:%M:%S}] poll ({why})")
+            try:
+                n = poll_once(conn, verbose=verbose)
+            except Exception as e:                                # noqa: BLE001
+                n = 0
+                print(f"  poll failed: {type(e).__name__}: {e}")
+            last_poll = time.time()
+            control_write(poll_finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                          note=f"{n} novih")
+            if verbose:
+                print(f"[{datetime.now(CEST):%H:%M:%S}] {n} new; next in {interval//60} min "
+                      f"or on request ({(deadline-time.time())/60:.0f} min of runtime left)")
+        if time.time() >= deadline:
+            control_write(note="pobiralnik miruje – naslednji zagon ob polni uri", runner_until=None)
+            if verbose:
+                print("serve window over — exiting so the next hourly run takes over")
+            return
+        time.sleep(min(15, max(1, deadline - time.time())))
+
+
 def push_supabase(rows):
     """Upsert parsed incidents into Supabase via the PostgREST endpoint. Idempotent
     (merge on id), so pushing every cycle's full parse is self-healing. No-op when
@@ -2365,10 +2438,17 @@ def main():
     ap.add_argument("--interval", type=int, default=600,
                     help="seconds between polls (default 600; please don't go below 300)")
     ap.add_argument("--once", action="store_true", help="fetch once, report, exit")
+    ap.add_argument("--serve-minutes", type=int, default=0, metavar="N",
+                    help="stay up for N minutes polling every --interval seconds and "
+                         "honouring on-demand requests from the dashboard, then exit "
+                         "(used by CI: GitHub's */15 cron drops most of its slots)")
     args = ap.parse_args()
 
     conn = db()
     print(f"VatroCAD · database {DB_PATH}")
+    if args.serve_minutes:
+        serve_loop(conn, args.serve_minutes, max(args.interval, 300))
+        return
     print("Initial fetch…")
     poll_once(conn)
     total = conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]

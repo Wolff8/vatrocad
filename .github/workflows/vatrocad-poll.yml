@@ -10,25 +10,38 @@
 #      The service_role key bypasses row-level security to WRITE. It must live
 #      only here as a secret — never in index.html or any client code.
 #
-# Cadence: every 15 minutes. These are small volunteer-brigade servers; do not
-# drop below ~5 minutes. GitHub also throttles cron under load, so a tick may
-# arrive a few minutes late — that is fine for a 12-hour live window.
+# Cadence: ONE job per hour that stays up for 55 minutes and polls every 15
+# minutes on its own clock.
+#
+# Why not just `cron: */15`? Because GitHub does not honour it. Scheduled
+# workflows are best-effort and get dropped under load — on this repo a */15
+# schedule fired exactly once in several hours, so the dashboard sat frozen for
+# both countries: nothing was scraping, while the sources themselves were fine.
+# An hourly schedule is honoured far more reliably, and the job's own loop then
+# gives a dependable 15-minute cadence.
+#
+# The loop also watches public.control.poll_requested_at, which the dashboard's
+# "Osveži" button stamps through the request_poll() RPC, and polls within ~15
+# seconds of a request. That is how manual "fetch now" works without putting any
+# credential in the page.
+#
+# These are small volunteer-brigade servers; don't take --interval below ~300s.
 
 name: VatroCAD poll
 
 on:
   schedule:
-    - cron: "*/15 * * * *"     # every 15 minutes (UTC)
+    - cron: "3 * * * *"         # hourly (UTC); the job then polls itself every 15 min
   workflow_dispatch: {}         # lets you run it by hand from the Actions tab
 
 concurrency:
   group: vatrocad-poll
-  cancel-in-progress: false     # never overlap two polls
+  cancel-in-progress: true      # a fresh hourly run replaces the one winding down
 
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 70          # the job itself stops at 55 min; this is the backstop
     steps:
       - uses: actions/checkout@v4
 
@@ -56,4 +69,4 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python3 vatrocad.py --once
+        run: python3 vatrocad.py --serve-minutes 55 --interval 900
