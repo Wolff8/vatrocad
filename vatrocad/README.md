@@ -303,6 +303,16 @@ after-action reports:
 | FF Mureck, FF Bad Radkersburg, FF Feldbach | `stmk` | brigade WordPress/Jimdo RSS |
 | BFKDO Klagenfurt-Land, Villach-Land, Wolfsberg, BFK Völkermarkt, FF Völkermarkt, FF Lavamünd | `ktn` | district-command and brigade WordPress RSS |
 
+**Police.** The Interior Ministry publishes each Landespolizeidirektion's press
+releases as an official RSS feed (`bmi.gv.at/rss/<stmk|ktn|noe|ooe>_presse.xml`):
+several a day, per incident, with the incident's date, hour and place in the
+text (Styria even opens with *"District | Town. –"*). The Austrian counterpart of
+the Croatian PU pages, and read the same way: traffic accidents, fires, alpine
+rescues, missing persons and fatalities are kept; pure crime (fraud, burglary,
+arrests, investigations) is filtered out — `AT_POLICE_SKIP`. Rows carry the
+police and every helper the release names (Feuerwehr X, Christophorus 11,
+Bergrettung, Notarzt) as units, and the console tags them 👮.
+
 These are reports, not calls: published hours to days later, a few per district
 per week. The alarm date/time is read from the text (*"Am 06.09.2026 um 09:29
 Uhr wurde … alarmiert"*, *"gegen 16:10 Uhr"*), the publication stamp is the

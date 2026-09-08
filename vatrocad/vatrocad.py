@@ -169,7 +169,7 @@ def translate_rows(conn, rows):
         t_sl, raw_sl = known.get(r["id"], (None, None))
         # Austrian dispatch: the title is glossed Slovenian already; gloss the
         # short type string for the narrative too. No network needed.
-        if country == "AT" and region in ("noe", "ooe"):
+        if country == "AT" and str(r.get("ref", "")).startswith(("NOE-", "OOE-")):
             t_sl = r.get("title"); raw_sl = at_translate(r.get("raw") or "")
         else:
             need = (t_sl is None or raw_sl is None) and recent(r) and not _mt_stop
@@ -1998,7 +1998,13 @@ _AT_TOWN_STOP = {"Bronze", "Silber", "Gold", "Brand", "Vollbrand", "Flammen", "K
                  "Folge", "Zukunft", "Bewegung", "Kärnten", "Steiermark", "Österreich", "Bereich",
                  "Abschnitt", "Bezirk", "Land", "Wald", "Wiese", "Feld", "Garage", "Keller", "Haus",
                  "Wohnhaus", "Gebäude", "Schwierigkeiten", "Vollalarm", "Dauereinsatz", "Sommer",
-                 "Frühjahr", "Herbst", "Winter", "Nacht", "Fahrt", "Anwesenheit", "Betrieb", "See"}
+                 "Frühjahr", "Herbst", "Winter", "Nacht", "Fahrt", "Anwesenheit", "Betrieb", "See",
+                 # police-release phrasing
+                 "Fahrtrichtung", "Unfall", "Straßenkilometer", "Zuge", "Nähe", "Ortsgebiet",
+                 "Gemeindegebiet", "Freiland", "Kreuzungsbereich", "Krankenhaus", "Landesklinikum",
+                 "Klinikum", "Spital", "Ambulanz", "Anschluss", "Zusammenhang", "Begleitung",
+                 "Abstimmung", "Verdacht", "Untersuchungshaft", "Anwesen", "Umgebung", "Ortschaft",
+                 "Verlauf", "Ersttäter", "Sturzflug", "Am", "Im", "An", "Bezirk", "Ort", "Hand"}
 _AT_TOWN_RE = re.compile(
     r"\((?:Markt|Stadt)?[Gg]emeinde\s+([A-ZÄÖÜ][\wäöüß.-]+(?:\s+(?:am|an der|im|ob|bei|in der)\s+[A-ZÄÖÜ][\wäöüß-]+)?)\)"
     r"|\b(?:in|bei)\s+([A-ZÄÖÜ][\wäöüß-]{2,}(?:\s+(?:am|an der|im|ob|bei)\s+[A-ZÄÖÜ][\wäöüß-]+)?)")
@@ -2030,11 +2036,21 @@ def _at_report_when(text: str, published: datetime):
     future (a typo) falls back to the publication date."""
     date = published.strftime("%Y-%m-%d")
     m = re.search(r"\b[Aa]m\s+(\d{1,2})\.\s?(\d{1,2})\.\s?(\d{4})", text)
+    cand = None
     if m:
         cand = f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
-        if cand <= published.strftime("%Y-%m-%d"):
-            date = cand
-    t = re.search(r"(?:um|gegen)\s+(\d{1,2})[:.](\d{2})\s*Uhr", text)
+    else:
+        # Police releases spell the month out: "Montagabend, 7. September 2026".
+        m = re.search(r"\b(\d{1,2})\.\s*(J[äa]nner|Januar|Februar|März|April|Mai|Juni|Juli|August|"
+                      r"September|Oktober|November|Dezember)\s+(\d{4})", text)
+        if m:
+            mon = ["jänner", "februar", "märz", "april", "mai", "juni", "juli", "august",
+                   "september", "oktober", "november", "dezember"]
+            name = m.group(2).lower().replace("januar", "jänner").replace("janner", "jänner")
+            cand = f"{m.group(3)}-{mon.index(name) + 1:02d}-{int(m.group(1)):02d}"
+    if cand and cand <= published.strftime("%Y-%m-%d"):
+        date = cand
+    t = re.search(r"(?:um|gegen)\s+(\d{1,2})[:.](\d{2})\s*Uhr", text, re.I)
     time_ = f"{int(t.group(1)):02d}:{t.group(2)}" if t else published.strftime("%H:%M")
     return date, time_
 
@@ -2092,6 +2108,109 @@ def make_at_feed(label, region, state, url, prefix, fallback):
                 "lat": lat, "lon": lon,
                 "units": ", ".join(units) or "—", "crew": None, "vehicles": len(units) or None,
                 "raw": body[:1600], "link": tidy(it.findtext("link") or ""),
+            })
+        return out, status
+
+    return fetch_source
+
+
+# ── Austrian police: the Interior Ministry's per-state press feeds ─────────
+# Official, per-incident, several a day, with the incident's date, hour and
+# place in the text — the Austrian counterpart of the Croatian PU pages. The
+# feeds carry everything the police say, so pure crime (fraud, burglary,
+# arrests, investigations) is filtered out, the same rule as for Croatia: this
+# is an emergency console, not a police blotter.
+#   (state code in the feed URL, label, region, state name, fallback (lat, lon))
+AT_POLICE = [
+    ("stmk", "Policija Štajerska · LPD", "stmk", "Steiermark", (47.20, 15.30)),
+    ("ktn",  "Policija Koroška · LPD",   "ktn",  "Kärnten",    (46.70, 14.10)),
+    ("noe",  "Policija Sp. Avstrija · LPD", "noe", "Niederösterreich", (48.20, 15.70)),
+    ("ooe",  "Policija Zg. Avstrija · LPD", "ooe", "Oberösterreich", (48.20, 14.00)),
+]
+AT_POLICE_SKIP = re.compile(
+    r"Betrug|Betrüger|Einbruch|Einbrecher|Diebstahl|Dieb|gestohlen|Raub|Räuber|Raufhandel|Schläger|"
+    r"Drogen|Suchtgift|Suchtmittel|Festnahme|festgenommen|Täter|Fahndung|Sachbeschädigung|"
+    r"Körperverletzung|Schlepper|Waffe|sexuell|Missbrauch|Ermittl|geklärt|ausgeforscht|angezeigt|"
+    r"Kontrolle|Schwerpunkt|Vandal|Bedrohung|Erpress|Cyber|Phishing|Trickbetr|Enkeltrick|"
+    r"Haftbefehl|Verhaftung|Anzeige|Prävention|Warnung|Kampagne|Ehrung|Verabschiedung|Vorstellung|"
+    r"Ausbildung|Übergabe|Amtsantritt|Jubiläum", re.I)
+AT_POLICE_CATCODE = [
+    (r"Verkehrsunfall|Kollision|Unfall|kollidiert|prallt|überschlag|Motorrad|Frontal|abgekommen|angefahren", "accident"),
+    (r"Brand|Feuer|Explosion|Gasaustritt|Rauch", "fire"),
+    (r"Rettung|Notlage|vermisst|Vermisst|Suchaktion|Suche nach|abgestürzt|Absturz|Lawine|Bergung|"
+     r"Bergsteiger|Wanderer|ertrunken|Badeunfall|eingeklemmt|verschüttet", "rescue"),
+    (r"Arbeitsunfall|Forstunfall|schwer verletzt|Notarzt|Hubschrauber|reanim|verstorben|tot aufgefunden|"
+     r"Leiche|Todesfall", "ems"),
+]
+_POL_STMK_HEAD = re.compile(r"^\s*([^|]{2,40})\|\s*([A-ZÄÖÜ][\wäöüß.\- ]{1,50}?)\s*[.–-]+\s*")
+
+
+def make_at_police(code, label, region, state, fallback):
+    """One fetcher per Landespolizeidirektion press feed (bmi.gv.at/rss/<st>_presse.xml)."""
+    url = f"https://www.bmi.gv.at/rss/{code}_presse.xml"
+    page = f"https://www.polizei.gv.at/{code}/presse/aussendungen/presse.html"
+
+    def fetch_source():
+        out = []
+        text, status = fetch(url)
+        if text is None:
+            return out, status
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError:
+            return out, "error: bad XML"
+        cutoff = (datetime.now(CEST) - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+        for it in root.findall(".//item"):
+            title = tidy(strip_tags(it.findtext("title") or ""))
+            body = tidy(strip_tags(it.findtext("description") or ""))
+            body = re.sub(r"^\s*Aktuelle Meldungen\s*Presseaussendung der Polizei \w+\s*", "", body)
+            published = _parse_pubdate(it.findtext("pubDate") or "")
+            if not title or published is None or AT_POLICE_SKIP.search(title):
+                continue
+            head = title + " " + body[:300]
+            cat = next((c for pat, c in AT_POLICE_CATCODE if re.search(pat, head, re.I)), None)
+            if cat is None:
+                continue
+            date, time_ = _at_report_when(body, published)
+            if date < cutoff:
+                continue
+            # Styria opens with "District | Town. – …"; Carinthia names the place
+            # in the title ("… in Klagenfurt", "… im Bezirk Völkermarkt").
+            district = town = None
+            m = _POL_STMK_HEAD.match(body)
+            if m:
+                district, town = tidy(m.group(1)), tidy(m.group(2))
+                body = body[m.end():]
+            if not town:
+                scope = title + " " + body[:400]
+                mg = re.search(r"\bGemeindegebiet von\s+((?:St\.|Sankt|Bad|Maria)\s+)?([A-ZÄÖÜ][\wäöüß.-]+"
+                               r"(?:\s+(?:am|an der|im|ob|bei)\s+[A-ZÄÖÜ][\wäöüß-]+)?)", scope)
+                mb = re.search(r"\bBezirk\s+([A-ZÄÖÜ][\wäöüß./-]+)", scope)
+                town = (((mg.group(1) or "") + mg.group(2) if mg else None) or _at_report_town(title)
+                        or (mb.group(1) if mb else None) or _at_report_town(body[:400]))
+                if mb and not district:
+                    district = mb.group(1)
+            town = tidy(town).rstrip(".,") if town else None
+            district = tidy(district).rstrip(".,") if district else None
+            lat, lon = _at_geocode(town, state) if town else (None, None)
+            if lat is None:
+                lat, lon = fallback
+            helpers = sorted({tidy(u) for u in re.findall(
+                r"\b(?:FF|Feuerwehr|Bergrettung|Wasserrettung)\s+[A-ZÄÖÜ][\wäöüß-]+|Rettungshubschrauber(?:\s+C\s?\d+)?|"
+                r"Christophorus\s?\d+|Rotes Kreuz|Rettung(?:sdienst)?|Notarzt|Alpinpolizei", body)})
+            loc = town or district or state
+            if district and town and district != town:
+                loc = f"{town} ({district})"
+            elif town:
+                loc = f"{town} ({state})"
+            out.append({
+                "id": rowid("AT-POL-" + code, date, time_, title),
+                "source": label, "region": region, "country": "AT",
+                "ref": f"POL-{code.upper()}-{date[5:7]}{date[8:]}-{time_.replace(':', '')}",
+                "date": date, "time": time_, "category": cat, "title": title[:120],
+                "status": "closed", "location": loc, "lat": lat, "lon": lon,
+                "units": ", ".join(["Polizei"] + helpers), "crew": None, "vehicles": None,
+                "raw": body[:1600], "link": tidy(it.findtext("link") or "") or page,
             })
         return out, status
 
@@ -2217,6 +2336,8 @@ SOURCES = [
     ("LFV Štajerska · poročila", src_at_stmk_lfv, "HTML list + report pages, Styria"),
     *[(label, make_at_feed(label, region, state, url, pfx, fb), "brigade report RSS")
       for (label, region, state, url, pfx, fb) in AT_FEEDS],
+    *[(label, make_at_police(code, label, region, state, fb), "BMI police press RSS")
+      for (code, label, region, state, fb) in AT_POLICE],
     ("Meteoalarm",        src_meteoalarm,    "CAP 1.2 Atom feed"),
 ]
 

@@ -315,7 +315,7 @@ footer{font-size:12px;color:var(--tx3);line-height:1.6;padding:0 6px}
   <div class="chead">
     <div>
       <h2>🇦🇹 Avstrija <span id="atCount" class="tag"></span></h2>
-      <div class="sub">NÖ/OÖ: dispečerski sistem v živo · Štajerska/Koroška: poročila enot ob meji · osveženo vsakih 15 min</div>
+      <div class="sub">NÖ/OÖ: dispečerski sistem v živo · Štajerska/Koroška: poročila enot ob meji · 👮 policija (LPD) vseh štirih dežel · osveženo vsakih 15 min</div>
     </div>
   </div>
   <div class="chips" id="atChips"></div>
@@ -415,6 +415,7 @@ const AT_KIND={B:"B = Brand — požar",T:"T = Technischer Einsatz — tehnična
 const AT_LEVEL={0:"stopnja 0 — brez nevarnosti, rutinska naloga",1:"stopnja 1 — manjši obseg, ena enota",2:"stopnja 2 — srednji obseg, več enot, ogrožene osebe",
   3:"stopnja 3 — večji obseg, enote iz sosednjih krajev",4:"stopnja 4 — velik dogodek, številne enote"};
 const isReport=i=>i.country==="AT"&&!/^(NOE|OOE)-/.test(i.ref||"");
+const isPolice=i=>/^Policija/.test(i.source||"");
 // Display title: Slovenian when we have it, else the original. A gloss that
 // only echoes the source (AT dispatch, already-Slovenian) is not "translated".
 const dtitle=i=>i.title_sl||i.title||"";
@@ -423,6 +424,7 @@ const srcLang=i=>i.country==="AT"?"nemško":"hrvaško";
 const isHeli=i=>/Hubschrauber|Landeplatz|Notarzt/i.test(i.raw||"");
 const atExplain=i=>{const m=/^(SOF|[BTSU])(\d)\b/.exec(i.raw||"");
   if(m) return `${AT_KIND[m[1]]||m[1]} · ${AT_LEVEL[m[2]]||("stopnja "+m[2])}`;
+  if(isPolice(i)) return "Uradno sporočilo deželne policijske direkcije (BMI), objavljeno naknadno. Datum in ura dogodka sta iz besedila sporočila, sicer čas objave.";
   if(isReport(i)) return "Poročilo gasilske enote, objavljeno naknadno — brez dispečerske kode. Datum in ura sta čas alarma iz besedila poročila, sicer čas objave.";
   return "Opisni naziv brez alarmne kode (Zgornja Avstrija kod ne uporablja).";};
 
@@ -490,7 +492,7 @@ function makePanel(cfg){
       <div class="ico" style="--c:${colorOf(i)}">${ic(iconOf(i))}</div>
       <div class="tm mono"><b>${esc(i.time||"—")}</b>${dmy(i.date)}<span class="ag ${isLive(i)?"live":""}" style="display:block">${fresh?"🆕 ":""}${ageShort(i)}</span></div>
       <div class="bd">
-        <div class="tt">${rep?`<span class="tag rep">${ic("i-report")} ${esc(CAT_SHORT[i.category]||i.category)}</span>`:""}${esc(dtitle(i))} ${status}</div>
+        <div class="tt">${rep?`<span class="tag rep">${isPolice(i)?"👮":ic("i-report")} ${esc(CAT_SHORT[i.category]||i.category)}</span>`:""}${esc(dtitle(i))} ${status}</div>
         <div class="lo">${ic("i-pin")}${esc(i.location||"—")}${cfg.regionTag(i)}</div>
         ${i.units&&i.units!=="—"?`<div class="un">${esc(i.units)}</div>`:""}
       </div></div>`;
@@ -589,7 +591,7 @@ const kv=pairs=>`<div class="kv">${pairs.filter(p=>p).map(([l,v])=>`<div><div cl
 function atDetail(i){
   return head(i)+kv([["Kraj",esc(i.location||"—")],["Zvezna dežela",esc(AT_STATE[i.region]||i.region)],
     ["Datum dojave",esc(i.date)],["Ura dojave",`${esc(i.time||"—")} · ${ageSl(i)}`],
-    ["Stanje",isReport(i)?"ZAKLJUČENO (poročilo)":(STATUS_SL[i.status]||"—")],["Vrsta vira",isReport(i)?"📰 poročilo enote":"📡 dispečerski dnevnik v živo"],
+    ["Stanje",isReport(i)?"ZAKLJUČENO (poročilo)":(STATUS_SL[i.status]||"—")],["Vrsta vira",isPolice(i)?"👮 policijsko sporočilo (LPD)":isReport(i)?"📰 poročilo enote":"📡 dispečerski dnevnik v živo"],
     ["Št. enot",String(i.vehicles??(i.units&&i.units!=="—"?i.units.split(",").length:"—"))],["Referenca",esc(i.ref||"—")],["Vir",esc(i.source)]])+
     `<div class="exp"><b>Koda in stopnja:</b> ${esc(atExplain(i))}<br><b>Vrsta:</b> ${esc(CAT_SL[i.category]||i.category)}${isHeli(i)?" · 🚁 v besedilu je omenjen helikopter / zdravnik NMP":""}
       ${i.units&&i.units!=="—"?`<br><b>Alarmirane enote:</b> ${esc(i.units)}`:""}</div>`+
@@ -638,7 +640,7 @@ const HR=makePanel({list:"hrList",map:"hrMap",sheet:"hrSheet",split:"hrSplit",vi
 
 // Legends
 $("atLegend").innerHTML=[["fire","Požar"],["tech","Tehnično"],["accident","Prometna nesreča"],["rescue","Reševanje"],["ems","NMP · 🚁 helikopter"],["other","Drugo"],["exercise","Vaja"]]
-  .map(([k,l])=>`<span><i class="d" style="background:${COL[k]}"></i>${ic(ICON[k])} ${l}</span>`).join("")+`<span>${ic("i-report")} poročilo enote (Štajerska/Koroška)</span><span style="color:var(--bad);font-weight:600">🆕 mlajše od 1 ure</span>`;
+  .map(([k,l])=>`<span><i class="d" style="background:${COL[k]}"></i>${ic(ICON[k])} ${l}</span>`).join("")+`<span>${ic("i-report")} poročilo enote (Štajerska/Koroška)</span><span>👮 policijsko sporočilo (LPD)</span><span style="color:var(--bad);font-weight:600">🆕 mlajše od 1 ure</span>`;
 $("hrLegend").innerHTML=[["fire","Požar"],["tech","Tehnično"],["ems","Asistenca NMP"],["accident","Nesreča s poškodovanimi"],["rescue","Reševanje (HGSS)"],["other","Drugo"]]
   .map(([k,l])=>`<span><i class="d" style="background:${COL[k]}"></i>${ic(ICON[k])} ${l}</span>`).join("");
 
