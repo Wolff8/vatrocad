@@ -475,12 +475,18 @@ function rebuild(){
   // scrape or a bad date parse. Never let one render as "just now". A five-minute
   // grace absorbs ordinary clock skew between this browser and the database.
   const cutoff=nowMs()+5*6e4;
+  // The app's own rule is "hide anything older than MAX_AGE_DAYS" — the log's
+  // window toggle only ever shows 12h or 3d, so nothing needs an incident older
+  // than that. Enforce it here, once, rather than in every place that reads
+  // DATA.incidents — the header's incident/source counts used to read the raw
+  // unfiltered total and silently grow past the promised 3-day cap forever as
+  // the archive accumulates.
   DATA.incidents=all.filter(i=>i.category!=="summary" && i.category!=="weather"
-    && (!i.date || tsOf(i.date,i.time)<=cutoff));
+    && (!i.date || tsOf(i.date,i.time)<=cutoff) && isRecent(i));
   DATA.context  =all.filter(i=>i.category==="summary"||i.category==="weather");
   const live=DATA.incidents.filter(isLive).length;
   const act =DATA.incidents.filter(i=>isActive(i)&&isRecent(i)).length;
-  $("scope").textContent=`${live} live · ${act} active · ${DATA.incidents.length} in last ${MAX_AGE_DAYS}d · ${new Set(all.map(i=>i.source)).size} sources`;
+  $("scope").textContent=`${live} live · ${act} active · ${DATA.incidents.length} in last ${MAX_AGE_DAYS}d · ${new Set(DATA.incidents.map(i=>i.source)).size} sources`;
   srcTiers(); draw();
   if(sel) detail([...DATA.incidents,...DATA.context].find(i=>i.id===sel));
   syncHeader();
@@ -488,7 +494,13 @@ function rebuild(){
 
 async function load(){
   try{
-    const url=`${SB_URL}/rest/v1/incidents?select=*&order=ts.desc.nullslast&limit=2000`;
+    // Server-side cap to match the app's own retention rule: never even fetch an
+    // incident older than the app will ever show. Keeps the payload small as the
+    // archive grows over weeks of 15-minute polls instead of re-downloading it
+    // in full every load. A one-day buffer past MAX_AGE_DAYS covers timezone
+    // rounding at the edge of the window.
+    const cutoffDate=new Date(Date.now()-(MAX_AGE_DAYS+1)*864e5).toISOString().slice(0,10);
+    const url=`${SB_URL}/rest/v1/incidents?select=*&order=ts.desc.nullslast&limit=2000&occurred=gte.${cutoffDate}`;
     const r=await fetch(url,{headers:{apikey:SB_KEY,Authorization:`Bearer ${SB_KEY}`},cache:"no-store"});
     if(!r.ok) throw new Error("HTTP "+r.status);
     const rows=await r.json();
