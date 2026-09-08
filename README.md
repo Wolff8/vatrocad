@@ -1,10 +1,12 @@
 # VatroCAD
 
-A live, dispatch-style console for Croatian fire-service and emergency-medical
-(hitna) interventions — chronological log, status pills (active / contained /
-closed), a geo plot, and a real-time active-incidents strip. Not a news feed:
-built to read like a CAD system, sourced from the public brigade, county
-(ŽVOC), police, and HVZ pages that publish per-call data.
+A live, dispatch-style console for fire-service and emergency-medical
+interventions in **Croatia** (fire + hitna) and **Austria** (Lower and Upper
+Austria fire dispatch, with Slovenian explanations of every alarm code) —
+chronological log, status pills (active / contained / closed), a geo plot per
+country, and a real-time active-incidents strip. Not a news feed: built to
+read like a CAD system, sourced from the public brigade, county (ŽVOC),
+police, HVZ and Landesfeuerwehrverband pages that publish per-call data.
 
 ```
   brigade / police / HVZ pages          (public sources)
@@ -32,8 +34,17 @@ built to read like a CAD system, sourced from the public brigade, county
   requires bypassing authentication; no satellite fire detections — this is
   interventions, not detections).
 - **`DEPLOY.md`** — step-by-step to wire up Supabase secrets and GitHub Pages.
-- **`.github/workflows/`** — the two Actions workflows: the poller cron and
-  the Pages deploy.
+- **`.github/workflows/`** — the Actions workflows: the poller cron (with a
+  cached geocode database between runs), the Pages deploy, and `probe.yml`, a
+  manual helper that fetches any URL from the runner's network and prints it
+  into the job log — for inspecting candidate sources that the development
+  sandbox cannot reach.
+
+Rows carry a `country` column (`HR` / `AT`). Croatian rows are kept as an
+archive and merely hidden after three days; Austrian rows are **deleted** after
+three days (and a running call that vanished from its live list is deleted
+after 40 minutes), because those feeds are an operational picture, not a
+record.
 
 ## Quick start
 

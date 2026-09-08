@@ -245,6 +245,54 @@ car park, a prosecutor's statement on the Pirovac collision.
 - **Facebook** — where most Croatian volunteer brigades actually post. Not scraped
   here: not open, not stable, and not something to build on.
 
+## Austria — second country
+
+Two Austrian states publish their fire-dispatch logs live and per call, and both
+are polled the same way. Rows get `country = 'AT'`, a `region` of `noe` or `ooe`,
+and the console renders them in its own pane with its own map, filters
+(state / only active / exercises) and a Slovenian detail panel that decodes
+every alarm code.
+
+| Source | Endpoint | What it carries |
+|---|---|---|
+| NÖ Feuerwehr · Wastl | `feuerwehr-krems.at/…/Land_EinsatzHistorie.asp` (closed) + `Land_EinsatzAktuell.asp` (running) | town, alarm type, exact second of alarm; running calls carry elapsed time instead of a timestamp |
+| OÖ Feuerwehr · LFV | `POST einsaetze.ooelfv.at/einsatz/2tage` with `exercise=Y` | town, district, alarm type, every brigade with its alarm and end time; exercises included and flagged |
+
+Alarm codes follow the Austrian scheme — `B` fire, `T` technical, `S` hazmat,
+`SOF` other, `U` exercise — with a severity digit 0–4. The console's glossary
+(`AT_SL_GLOSSARY` in `vatrocad.py`, ~100 entries) turns the German type into
+Slovenian, and the detail panel explains the code, the severity, and the status.
+
+- **Status is real, not inferred.** NÖ's running list and OÖ's per-brigade end
+  times give `active` / `closed`; a call is closed only when every brigade has
+  stood down.
+- **Retention is a delete, not a hide.** Austrian rows are removed after 3 days;
+  a running NÖ call not seen for 40 minutes is removed too (it has moved to the
+  history list under a new id).
+- **Geocoding is Nominatim** (`countrycodes=at`, one request per second, only hits
+  cached) instead of the Croatian gazetteer, because the town list is long and
+  open-ended.
+- **Exercises are shown** (🎓, italic) because the user asked for them; the
+  "Vaje" toggle hides them.
+
+### EMS and helicopter data in Austria — there is none
+
+Searched for, and not found: a public live feed of ambulance or rescue-helicopter
+missions. **Notruf NÖ 144** has a web view, but it sits behind a login and was not
+attempted. **Leitstelle Tirol** publishes only aggregate statistics. The Red Cross
+publishes nothing machine-readable. The **ffw-einsatzmonitor** products are
+commercial kiosk software with no public endpoint. An unofficial Christophorus
+tracker that once existed has been shut down. What *is* visible are the
+EMS-adjacent calls in the fire logs — *Tragehilfe* (assist ambulance crew),
+*Hubschrauberlandeplatz* (secure a helicopter landing site), *Notarzt* — and the
+console tags those 🚑 / 🚁 so they stand out.
+
+**Styria** (`einsatzuebersicht.lfv.steiermark.at`) has a public overview too, but
+the host does not answer at all — TCP connect times out — from both the
+development sandbox and GitHub's US runners (checked with `probe.yml`). It is
+probably geo-fenced to Austrian/EU addresses. A parser is pointless until it
+can be polled from a runner; revisit with a self-hosted or EU runner.
+
 ## Why there's no API to call
 
 Croatian fire dispatch runs on **UVI** (Upravljanje vatrogasnim intervencijama) with

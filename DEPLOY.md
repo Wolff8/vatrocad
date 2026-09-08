@@ -83,7 +83,14 @@ Repo → **Settings → Pages → Build and deployment → Source: GitHub Action
   small volunteer-brigade servers, and `vatrocad.py` already uses conditional GET
   so unchanged pages cost them almost nothing.
 - **Freshness.** The console shows the 12-hour live band by default and caps the
-  log at 3 days; older rows stay in the table but are hidden.
+  log at 3 days; older Croatian rows stay in the table but are hidden. Austrian
+  rows (`country = 'AT'`) are deleted by the poller once they pass 3 days.
+- **Geocode cache.** The poller restores `vatrocad/vatrocad.sqlite3` from the
+  Actions cache (`Restore geocode cache` step) so Austrian towns are not
+  re-geocoded on every run. A cold cache costs ~2 minutes on the first run.
+- **Probing a new source.** Actions tab → **probe URL** → *Run workflow* with the
+  URL; the job log shows the response headers and the first N bytes of the body
+  as seen from a GitHub runner.
 - **Cost.** Supabase free tier and GitHub Actions/Pages free minutes cover this
   comfortably. A Supabase free project pauses after ~1 week with no traffic; the
   15-min poller keeps it awake.
