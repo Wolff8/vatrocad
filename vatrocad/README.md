@@ -161,9 +161,26 @@ Horvati** — has an open Intervencije category with current posts (latest 29 Ma
 publish community news. Horvati is in the table above; it is thin, but it is Zagreb's
 only open window.
 
-**Varaždin** has nothing: JVP Varaždin's RSS is stale since February, VZ Varaždinske
-and DVD Varaždin publish notices. JVP Čakovec gives annual totals only — 329 calls
-in 2025.
+**Varaždin** has no per-call brigade log: JVP Varaždin's RSS is stale since
+February, VZ Varaždinske and DVD Varaždin publish notices only. JVP Čakovec
+gives annual totals only — 329 calls in 2025. What it does have, added later,
+is **Vzaktualno**'s crna-kronika feed — confirmed live, multiple posts a day,
+real accidents mixed in with the crime-blotter noise the category filter
+already drops.
+
+**Krapina-Zagorje** had nothing at all until a second pass found
+**zagorje.com**'s own `/rss` feed — live, current, real fire and accident
+content. (Radio Hrvatsko zagorje Krapina's crna-kronika category looked like
+the obvious candidate first; it turned out to be a dead archive, newest item
+from 2014 — worth remembering that a promising-looking category page can be
+abandoned years ago and still resolve with a 200.) eVaraždin.hr and
+Varaždinske Vijesti were checked too and expose no discoverable RSS feed;
+sjeverozapad.hr's `/feed/` is a WordPress *comments* feed, not an article
+feed — same URL shape, different content entirely.
+
+**Virovitica-Podravina** — outside the "north" proper but found in the same
+pass — has **ICV** (Informativni centar Virovitica), confirmed live at
+several posts a day, real fires and accidents.
 
 ### What can actually fill a 12-hour window
 
