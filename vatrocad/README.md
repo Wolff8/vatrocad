@@ -313,6 +313,33 @@ late, report rows live **7 days** (`AT_REPORT_MAX_AGE_DAYS`) instead of the
 3-day rule for the NÖ/OÖ dispatch rows; the console marks them 📰 and the
 "Ob meji SLO" filter shows just this belt.
 
+## Slovenian auto-translation
+
+The console is Slovenian, but the feeds are German (Austria) and Croatian. Each
+row's title and narrative are translated once into Slovenian via **MyMemory**'s
+free, keyless endpoint (`de|sl`, `hr|sl`) and stored in two extra columns,
+`title_sl` / `raw_sl`, next to the untouched original. The console shows the
+Slovenian text with the original one tap away (an *Izvirnik* disclosure) and a
+"samodejni prevod" note.
+
+It is engineered to live inside the anonymous free tier, the same way geocoding
+does:
+
+- **Cache-first, forever.** Every translation is keyed by a hash of the source
+  text in the local SQLite `translate_cache`, which the Actions cache persists
+  between runs — a row is translated once and never again.
+- **Only what's shown.** Rows outside the display window are never translated
+  (the Croatian archive is kept forever but only three days are ever shown), and
+  Austrian dispatch titles are already glossed, so they cost nothing — only the
+  border reports and Croatian rows hit the network.
+- **Budgeted.** A per-day word cap (`MT_DAILY_WORDS`, tracked in a `meta` table)
+  keeps us under the ~5000-words/day anonymous limit, and a per-cycle call cap
+  bounds the job. Austrian border reports are translated before the larger
+  Croatian set; within that, newest first. A quota or network failure ends the
+  cycle cleanly and retries next run.
+- **Honest fallback.** Anything not yet translated shows its clean original — no
+  machine-guessed half-translations.
+
 ## Why there's no API to call
 
 Croatian fire dispatch runs on **UVI** (Upravljanje vatrogasnim intervencijama) with

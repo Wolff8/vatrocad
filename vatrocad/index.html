@@ -58,6 +58,13 @@ svg.ic{width:1em;height:1em;fill:currentColor;vertical-align:-.15em;flex:none}
 .ibtn:hover{color:var(--tx);background:var(--panel3)}
 .ibtn.spin svg{animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+.rbtn{height:40px;padding:0 14px;border-radius:10px;display:inline-flex;align-items:center;gap:7px;flex:none;
+  color:var(--bg);background:var(--tx);border:1px solid var(--tx);font-weight:700;font-size:13px;transition:transform .12s,opacity .12s}
+.rbtn svg{font-size:17px}
+.rbtn:active{transform:scale(.95)}
+.rbtn.spin{opacity:.6;pointer-events:none}
+.rbtn.spin svg{animation:spin .9s linear infinite}
+@media(max-width:520px){.rbtn .rl{display:none}.rbtn{padding:0 12px}}
 #clock{font-size:18px;font-weight:600;line-height:1}
 .cl{font-size:9px;letter-spacing:.12em;color:var(--tx3);text-align:right}
 @media(max-width:520px){#clockwrap{display:none}}
@@ -292,7 +299,7 @@ footer{font-size:12px;color:var(--tx3);line-height:1.6;padding:0 6px}
     <div class="brandsub" id="scope">povezujem…</div>
   </div>
   <div class="led" id="feedled"><i></i><span id="feedtxt">povezujem…</span><span class="t" id="feedt"></span></div>
-  <button class="ibtn" id="refresh" aria-label="Osveži podatke" title="Osveži"><svg class="ic"><use href="#i-refresh"/></svg></button>
+  <button class="rbtn" id="refresh" aria-label="Osveži zdaj" title="Osveži zdaj"><svg class="ic"><use href="#i-refresh"/></svg><span class="rl">Osveži</span></button>
   <div id="clockwrap"><div id="clock" class="mono">--:--:--</div><div class="cl mono">CEST</div></div>
 </header>
 
@@ -694,18 +701,24 @@ async function sbGet(q){
   const r=await fetch(`${SB_URL}/rest/v1/incidents?${q}`,{headers:{apikey:SB_KEY,Authorization:`Bearer ${SB_KEY}`},cache:"no-store"});
   if(!r.ok) throw new Error("HTTP "+r.status); return r.json();
 }
-async function load(){
+let lastAdded=0;
+async function load(opts={}){
   try{
     const cutoffDate=new Date(Date.now()-(AT_REPORT_DAYS+1)*864e5).toISOString().slice(0,10);
     const rows=await sbGet(`select=*&order=ts.desc.nullslast&limit=2000&occurred=gte.${cutoffDate}`);
     const before=ROWS.size, had=new Set(ROWS.keys());
-    ROWS.clear(); rows.forEach(row=>ROWS.set(row.id,row));
+    let changed=0;
+    rows.forEach(r=>{ const prev=ROWS.get(r.id); if(!prev||prev.last_seen!==r.last_seen||prev.title_sl!==r.title_sl) changed++; });
     const added=rows.filter(r=>!had.has(r.id)).length;
+    ROWS.clear(); rows.forEach(row=>ROWS.set(row.id,row));
     rows.forEach(r=>{ if(r.last_seen>maxSeen) maxSeen=r.last_seen; });
-    lastSync=Date.now(); if(added&&before) {lastChange=Date.now(); toast(`+${added} novih vrstic`);} else if(!before) lastChange=Date.now();
+    lastAdded=added; lastSync=Date.now();
+    if((added||changed)&&before){ lastChange=Date.now(); if(added&&!opts.quiet) toast(`+${added} novih intervencij`); }
+    else if(!before) lastChange=Date.now();
     if(rtStatus!=="live") rtStatus="polling";
     rebuild();
-  }catch(e){ rtStatus="offline"; $("scope").textContent="ni povezave s Supabase"; syncHeader(); }
+    return {added,changed};
+  }catch(e){ rtStatus="offline"; $("scope").textContent="ni povezave s Supabase"; syncHeader(); throw e; }
 }
 // A 1-row probe every 60 s (a few hundred bytes): if the newest last_seen moved, something was upserted → full reload.
 // This is what makes the board move even when the websocket looks alive but silently dropped (iOS background).
@@ -725,7 +738,15 @@ function startRealtime(){
       else if(rtStatus==="live"&&(status==="CHANNEL_ERROR"||status==="TIMED_OUT"||status==="CLOSED")){ rtStatus="polling"; syncHeader(); }
     });
 }
-$("refresh").addEventListener("click",async()=>{const b=$("refresh"); b.classList.add("spin"); try{ await load(); toast(`Osveženo · ${ROWS.size} vrstic`);} finally{ b.classList.remove("spin"); }});
+$("refresh").addEventListener("click",async()=>{
+  const b=$("refresh"); if(b.classList.contains("spin")) return;
+  b.classList.add("spin"); toast("Osvežujem…");
+  try{
+    const {added}=await load({quiet:true});
+    toast(added? `+${added} novih · skupaj ${ROWS.size}` : `Ni novega · ${ROWS.size} vrstic · ${cestHM(Date.now())}`);
+  }catch(e){ toast("Napaka pri osveževanju"); }
+  finally{ b.classList.remove("spin"); }
+});
 document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") load(); });
 window.addEventListener("online",load);
 function tick(){const n=new Date(),p=x=>String(x).padStart(2,"0");const c=new Date(n.getTime()+n.getTimezoneOffset()*6e4+2*36e5);
