@@ -1229,6 +1229,56 @@ def src_hgss():
     return out, status
 
 
+def src_hac():
+    """HAC — Hrvatske autoceste (the state motorway operator, distinct from the
+    HAK auto club, whose own traffic map turned out to be a JS app with no
+    discoverable public data endpoint short of executing it in a browser).
+
+    A different kind of source entirely: not a newsroom or a brigade, but the
+    infrastructure operator's own server-rendered "izvanredni događaj"
+    (extraordinary event) log, one section per motorway stretch, covering the
+    whole national network — including corridors (Slavonija, the A4 north)
+    that no other source here reaches. Genuinely low frequency (roughly one
+    event nationwide every couple of weeks) but zero overlap with anything
+    else, and free: no JS, no auth, plain server-rendered HTML.
+    """
+    out = []
+    text, status = fetch("https://www.hac.hr/hr/servisne-informacije/stanje-na-autocestama")
+    if text is None:
+        return out, status
+    # Each motorway stretch is its own "<h4>name</h4> ... events ..." section;
+    # split on the header so every event is attributed to the right stretch.
+    parts = re.split(r'<h4 class="text-xl">([^<]+)</h4>', text)
+    cutoff = (datetime.now(CEST) - timedelta(days=MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    for i in range(1, len(parts) - 1, 2):
+        stretch, section = tidy(parts[i]), parts[i + 1]
+        for m in re.finditer(
+                r'info-title">Izvanredni događaj</span>\s*<span class="font-medium">'
+                r'(\d{2}):(\d{2})\s*(\d{2})\.(\d{2})\.(\d{4})</span>\s*<span\s*class="mt-1">'
+                r'([^<]+)</span>', section):
+            hh, mm, dd, mo, yy, desc = m.groups()
+            date = f"{yy}-{mo}-{dd}"
+            if date < cutoff:
+                continue                                  # keep the archive out of the live parse
+            desc = tidy(html_unescape(desc))
+            # The event text often names an exit/town more precisely than the
+            # stretch header; fall back to the first town named in the header.
+            lat, lon = geocode(desc)
+            if lat is None:
+                lat, lon = geocode(stretch)
+            out.append({
+                "id": rowid("HAC", date, f"{hh}:{mm}", stretch + desc),
+                "source": "HAC · autoceste", "region": "nat",
+                "ref": f"HAC-{mo}{dd}-{hh}{mm}", "date": date, "time": f"{hh}:{mm}",
+                "category": "tech", "title": f"{stretch}: {desc}"[:110],
+                "location": place_label(desc) or stretch, "lat": lat, "lon": lon,
+                "units": "HAC", "crew": None, "vehicles": None,
+                "raw": desc[:600],
+                "link": "https://www.hac.hr/hr/servisne-informacije/stanje-na-autocestama",
+            })
+    return out, status
+
+
 def place_label(text: str):
     scrubbed = UNIT_RE.sub(" ", text)
     for m in LOC_PHRASE.finditer(scrubbed):
@@ -1286,6 +1336,7 @@ SOURCES = [
     ("ŽVOC Šibenik-Knin", src_zvoc_sibenik,  "HTML county bulletin"),
     ("HVZ · DVOC 193",    src_dvoc_national, "HTML national digest"),
     ("HGSS · spašavanje", src_hgss,          "RSS · mountain rescue"),
+    ("HAC · autoceste",   src_hac,           "HTML, national motorway network"),
     ("Meteoalarm",        src_meteoalarm,    "CAP 1.2 Atom feed"),
 ]
 
