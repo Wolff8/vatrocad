@@ -299,20 +299,27 @@ function activeStrip(){
 }
 
 // ── Map (Leaflet) ────────────────────────────────────────────────────────────
-// A real tiled basemap with pan/zoom, not a hand-drawn coastline. Dark CARTO
-// tiles (free, no API key) to match the console. The view (pan/zoom) is left
+// A real tiled basemap with pan/zoom, not a hand-drawn coastline. CARTO's
+// anonymous dark_all tiles (used originally) now return HTTP 200 but with an
+// "API KEY REQUIRED" watermark baked into the image — CARTO deprecated free
+// anonymous raster access, so the status code alone didn't catch it. Esri's
+// World_Dark_Gray Canvas tiles are still genuinely free, no key, no signup,
+// confirmed by fetching and looking at actual tiles over Croatia. Two layers,
+// Esri's own standard split: Base (terrain/roads) under Reference (labels),
+// so labels stay legible over the dark base. The view (pan/zoom) is left
 // alone after the first load so a realtime update never yanks it out from
 // under someone who's zoomed into one county.
 let map=null, markerLayer=null, mapInited=false;
 const markersById=new Map();
+const ESRI_ATTR='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ';
 
 function initMap(){
   if(typeof L==="undefined") return;   // CDN unreachable — log/KPIs still work
   map=L.map("leafletMap",{scrollWheelZoom:true}).setView([45.3,16.6],7);
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",{
-    subdomains:"abcd", maxZoom:19,
-    attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
-  }).addTo(map);
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    {maxZoom:16, attribution:ESRI_ATTR}).addTo(map);
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+    {maxZoom:16}).addTo(map);   // labels-only overlay (transparent background), stacks above the base tile since it's added second
   markerLayer=L.layerGroup().addTo(map);
 }
 
@@ -548,8 +555,7 @@ $("foot").innerHTML=`Live from a <b>Supabase</b> Postgres backend over a realtim
   (read-only publishable key, row-level security; falls back to 30s REST polling if the socket drops).
   Rows are pushed by <code>vatrocad.py</code>, which polls Croatia's public brigade, ŽVOC, police and
   HVZ pages. Dispatch itself runs on HVZ's closed <b>UVI/VATROnet</b>; these public pages are the only
-  open surface. Window: live = ${LIVE_HOURS}h, log capped at ${MAX_AGE_DAYS} days. Map tiles ©
-  OpenStreetMap contributors, © CARTO.`;
+  open surface. Window: live = ${LIVE_HOURS}h, log capped at ${MAX_AGE_DAYS} days. Map tiles © Esri.`;
 
 initMap();
 load().then(startRealtime);

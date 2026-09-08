@@ -28,6 +28,7 @@ import sqlite3
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -384,6 +385,82 @@ def geocode(text: str):
                 (best is None or len(name) > len(best[0])):
             best = (name, coords)
     return best[1] if best else (None, None)
+
+
+# --------------------------------------------------------------------------
+# Street-level refinement, on top of the settlement-centroid gazetteer above.
+# The gazetteer only ever gets an incident to the right town — good enough for
+# a village brigade, but "u ulici Bana Ivana Mažuranića u Šibeniku" names an
+# actual street the gazetteer can't resolve on its own. Nominatim (OSM's free
+# geocoder) can, so a text that names a street gets a second, sharper lookup.
+# Strictly rate-limited and cached forever locally, per Nominatim's usage
+# policy (max 1 request/second, an identifying User-Agent, no bulk geocoding) —
+# this only ever geocodes the handful of *new* street names a cycle's parse
+# actually contains, never the whole archive. Best-effort throughout: any
+# failure just leaves the existing settlement-centroid fix in place.
+# --------------------------------------------------------------------------
+STREET_RE = re.compile(
+    # A Croatian street name is not always led by a capitalised word — "Ulica
+    # kralja Tomislava" starts with a lowercase title noun — so anchor only on
+    # "ulic(a/i/u/e)" itself, not on capitalisation of what follows.
+    r"\b[Uu]lic\w*\s+([\wšđčćžA-ZŠĐČĆŽ][\wšđčćžA-ZŠĐČĆŽ.\- ]{2,40}?)(?=\s+u\s|[,.]|$)", re.U)
+NOMINATIM_UA = "VatroCAD/1.0 (personal dispatch dashboard; +https://github.com/Wolff8/vatrocad)"
+NOMINATIM_MAX_PER_CYCLE = 25     # bounds one poll's worst-case added wall time to ~30s
+_nominatim_last_call = [0.0]
+
+
+def _nominatim_lookup(query: str):
+    """One rate-limited Nominatim call. Never raises; returns (lat, lon) or None."""
+    wait = _nominatim_last_call[0] + 1.1 - time.time()
+    if wait > 0:
+        time.sleep(wait)
+    _nominatim_last_call[0] = time.time()
+    url = ("https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=hr&q="
+           + urllib.parse.quote(query))
+    req = urllib.request.Request(url, headers={"User-Agent": NOMINATIM_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        if data:
+            return float(data[0]["lat"]), float(data[0]["lon"])
+    except Exception:                                             # noqa: BLE001
+        pass
+    return None
+
+
+def refine_locations(conn, rows):
+    """Sharpen a settlement-centroid fix to an actual street, for incidents
+    whose text names one. Mutates lat/lon on `rows` in place."""
+    budget = NOMINATIM_MAX_PER_CYCLE
+    for r in rows:
+        if budget <= 0:
+            break
+        if r.get("lat") is None or not r.get("location"):
+            continue
+        blob = f"{r.get('title', '')} {r.get('raw', '')}"
+        m = STREET_RE.search(blob)
+        if not m:
+            continue
+        street = tidy(m.group(1))
+        if len(street) < 4:
+            continue
+        cache_key = f"{street}|{r['location']}"
+        row = conn.execute("SELECT lat, lon FROM geocode_cache WHERE q=?", (cache_key,)).fetchone()
+        if row is not None:
+            lat, lon = row["lat"], row["lon"]
+        else:
+            hit = _nominatim_lookup(f"{street}, {r['location']}, Hrvatska")
+            budget -= 1
+            lat, lon = hit if hit else (None, None)
+            with conn:
+                conn.execute("INSERT OR IGNORE INTO geocode_cache(q, lat, lon) VALUES(?,?,?)",
+                             (cache_key, lat, lon))
+        if lat is None:
+            continue
+        # A street "hit" far from the settlement centroid is a bad match (a
+        # same-named street in a different town) — keep the safer fallback.
+        if abs(lat - r["lat"]) < 0.35 and abs(lon - r["lon"]) < 0.5:
+            r["lat"], r["lon"] = lat, lon
 
 
 # --------------------------------------------------------------------------
@@ -1212,6 +1289,8 @@ CREATE TABLE IF NOT EXISTS incidents(
 CREATE INDEX IF NOT EXISTS ix_inc_date ON incidents(date DESC, time DESC);
 CREATE TABLE IF NOT EXISTS sources(
   name TEXT PRIMARY KEY, method TEXT, status TEXT, count INTEGER, checked TEXT);
+CREATE TABLE IF NOT EXISTS geocode_cache(
+  q TEXT PRIMARY KEY, lat REAL, lon REAL);
 """
 
 
@@ -1280,6 +1359,13 @@ def poll_once(conn, verbose=True):
                    count=excluded.count,checked=excluded.checked""",
                 (label, "gov.hr CMS", "ok", n,
                  datetime.now(timezone.utc).isoformat(timespec="seconds")))
+    # Sharpen settlement-centroid fixes to an actual street where the text
+    # names one, before pushing — see refine_locations() docstring.
+    try:
+        refine_locations(conn, all_rows)
+    except Exception as e:                                        # noqa: BLE001
+        if verbose:
+            print(f"  street refinement skipped: {type(e).__name__}: {e}")
     # Mirror this cycle's full parse into Supabase (idempotent upsert) so a
     # published, machine-independent dashboard can read it.
     sb = push_supabase(all_rows)
