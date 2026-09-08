@@ -1881,7 +1881,7 @@ def src_at_stmk_lfv():
                 time_ = ""
             town = _at_report_town(title) or _at_report_town(body)
             lat, lon = _at_geocode(town, "Steiermark") if town else (None, None)
-            location = (town or "Steiermark") + " (Steiermark)"
+            location = f"{town} (Steiermark)" if town else "Steiermark"
         out.append({
             "id": rid, "source": "LFV Štajerska · poročila", "region": "stmk", "country": "AT",
             "ref": f"STMK-LFV-{mo}{dd}", "date": date, "time": time_ or "",

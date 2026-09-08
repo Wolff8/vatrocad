@@ -1,818 +1,730 @@
 <!doctype html>
-<html lang="en">
+<html lang="sl">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="VatroCAD">
 <title>VatroCAD — HR · AT dispatch console</title>
-<!-- Designed in IBM Plex; loaded async so an offline machine paints on the
-     fallback stacks rather than blocking on a font that never arrives. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" media="print" onload="this.media='all'"
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;650&display=swap">
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <style>
+/* ── Tokens. Contrast tuned for phones outdoors: secondary text ≥ 4.5:1 on the panel. ── */
 :root{
   color-scheme:dark;
-  --bg:#080b0e;--panel:#10151a;--panel2:#151b22;--panel3:#1a222a;
-  --line:#212b34;--line2:#2c3945;--tx:#dce5ed;--tx2:#8fa1b2;--tx3:#5d7285;
-  --fire:#ff6a35;--tech:#4d9de0;--ems:#b478ec;--accident:#ffd23f;--rescue:#2ec4b6;--other:#7f8d9b;--weather:#ffc233;
-  --ok:#32c46e;--warn:#ffc233;--bad:#ff4a4a;--active:#ff4a4a;--contained:#ffc233;--closed:#5d7285;
+  --bg:#0b0f14;--panel:#131a22;--panel2:#18212b;--panel3:#1f2a36;
+  --line:#26323f;--line2:#33424f;--tx:#eef3f8;--tx2:#b3c2d1;--tx3:#8496a8;
+  --fire:#ff7a45;--tech:#5aa9ec;--ems:#c48cf5;--accident:#ffd84d;--rescue:#3ad3c4;--other:#9aa8b6;
+  --exercise:#8fa0b0;--weather:#ffc233;--report:#a3b1bf;
+  --ok:#3ddc7e;--warn:#ffc233;--bad:#ff5252;--active:#ff5252;--contained:#ffc233;--closed:#7f92a4;
+  --hr:#ff5c5c;--at:#ff7a45;
+  --r:12px;--top:56px;
+  --sat:env(safe-area-inset-top,0px);--sab:env(safe-area-inset-bottom,0px);
 }
-*{box-sizing:border-box}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html{-webkit-text-size-adjust:100%}
 html,body{margin:0;background:var(--bg);color:var(--tx)}
-body{font:13px/1.5 "IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,sans-serif}
-.mono,code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-variant-numeric:tabular-nums}
-.shell{max-width:1320px;margin:0 auto;padding:12px 12px 34px;display:flex;flex-direction:column;gap:10px}
-.topbar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;background:var(--panel);
-  border:1px solid var(--line);border-radius:3px;padding:9px 13px}
-.brand{font-size:21px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;line-height:1}
-.brand span{color:var(--fire)}
-.brandsub{font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--tx3);margin-top:2px;min-height:13px}
-.sp{flex:1}
-.led{display:inline-flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;
-  text-transform:uppercase;color:var(--tx2)}
-#feedtxt{display:inline-block;min-width:216px}
-.led i{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 7px var(--ok)}
-.led.b i{background:var(--bad);box-shadow:0 0 7px var(--bad)}
-#clock{font-size:21px;font-weight:600}
-.cl{font-size:9px;letter-spacing:.14em;color:var(--tx3);text-align:right}
-button.rf{background:var(--panel3);color:var(--tx2);border:1px solid var(--line2);border-radius:2px;
-  font:600 10px/1 "IBM Plex Mono",monospace;letter-spacing:.1em;text-transform:uppercase;
-  padding:7px 11px;cursor:pointer}
-button.rf:hover{color:var(--tx);border-color:var(--tx3)}
-button.rf:disabled{opacity:.5;cursor:wait}
-/* Each region reserves the height it fills, so the page holds still on first paint. */
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:1px;
-  background:var(--line);border:1px solid var(--line);border-radius:3px;overflow:hidden;min-height:58px}
-#rows{min-height:430px}
-#srcbar{min-height:78px}
-.kpi{background:var(--panel);padding:8px 12px}
-.kpi .l{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--tx3)}
-.kpi .v{font-size:24px;font-weight:650;line-height:1.15;margin-top:1px}
-/* Active-ops strip: the dispatch "what is burning right now" banner. */
-.active-strip{background:var(--panel);border:1px solid var(--line);border-radius:3px;overflow:hidden}
-.active-strip>h3{margin:0;padding:7px 12px;font:700 9.5px/1.5 "IBM Plex Mono",monospace;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--active);background:var(--panel2);border-bottom:1px solid var(--line);
+body{font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overscroll-behavior-y:contain}
+.mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+a{color:var(--tech)}
+svg.ic{width:1em;height:1em;fill:currentColor;vertical-align:-.15em;flex:none}
+[hidden]{display:none!important}
+
+/* ── Top bar: sticky, compact, one line. ── */
+.top{position:sticky;top:0;z-index:40;height:calc(var(--top) + var(--sat));padding-top:var(--sat);
+  display:flex;align-items:center;gap:10px;padding-left:14px;padding-right:10px;
+  background:rgba(11,15,20,.86);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.brand{font-weight:800;font-size:19px;letter-spacing:.02em;line-height:1}
+.brand b{color:var(--at)}
+.brandsub{font-size:11px;color:var(--tx3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sp{flex:1;min-width:0}
+.top>div:first-child{flex:1;min-width:0}
+.led{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--tx2);white-space:nowrap;flex:none}
+.led i{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);flex:none}
+.led.b i{background:var(--bad);box-shadow:0 0 8px var(--bad)}
+.led.p i{background:var(--warn);box-shadow:0 0 8px var(--warn)}
+.led .t{display:none}
+@media(min-width:700px){.led .t{display:inline}}
+.ibtn{width:40px;height:40px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;
+  color:var(--tx2);background:var(--panel2);border:1px solid var(--line2);font-size:18px;flex:none;transition:background .15s,transform .15s}
+.ibtn:active{transform:scale(.94)}
+.ibtn:hover{color:var(--tx);background:var(--panel3)}
+.ibtn.spin svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#clock{font-size:18px;font-weight:600;line-height:1}
+.cl{font-size:9px;letter-spacing:.12em;color:var(--tx3);text-align:right}
+@media(max-width:520px){#clockwrap{display:none}}
+
+/* ── Country segmented control (phones); on wide screens both countries stack. ── */
+.seg{position:sticky;top:calc(var(--top) + var(--sat));z-index:39;display:flex;gap:6px;padding:8px 12px;
+  background:rgba(11,15,20,.86);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.seg button{flex:1;height:40px;border-radius:10px;font-weight:600;font-size:14px;color:var(--tx2);
+  background:var(--panel2);border:1px solid var(--line2);display:flex;align-items:center;justify-content:center;gap:8px}
+.seg button[aria-pressed=true]{background:var(--tx);color:var(--bg);border-color:var(--tx)}
+.seg .n{font-size:11px;font-weight:700;padding:2px 7px;border-radius:99px;background:rgba(0,0,0,.18)}
+.seg button[aria-pressed=true] .n{background:rgba(0,0,0,.14)}
+@media(min-width:920px){.seg{display:none}}
+
+.shell{max-width:1360px;margin:0 auto;padding:10px 10px calc(28px + var(--sab));display:flex;flex-direction:column;gap:12px}
+@media(max-width:919px){.country[data-off]{display:none}}
+
+/* ── Country section ── */
+.country{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.country.hr{border-top:3px solid var(--hr)}
+.country.at{border-top:3px solid var(--at)}
+.chead{display:flex;align-items:center;gap:10px;padding:12px 14px 6px}
+.chead h2{margin:0;font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px}
+.chead .sub{font-size:12px;color:var(--tx3);margin-top:2px}
+.chips{display:flex;gap:8px;overflow-x:auto;padding:8px 14px 10px;scrollbar-width:none;scroll-snap-type:x proximity}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;scroll-snap-align:start;min-width:96px;padding:8px 12px;border-radius:10px;background:var(--panel2);border:1px solid var(--line)}
+.chip .l{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--tx3);white-space:nowrap}
+.chip .v{font-size:22px;font-weight:700;line-height:1.15;margin-top:2px;display:flex;align-items:center;gap:6px}
+.chip .v svg{font-size:16px;opacity:.9}
+.chip.hot .v{color:var(--bad)}
+
+/* Active-ops strip */
+.astrip{margin:0 14px 8px;border:1px solid color-mix(in srgb,var(--active) 45%,var(--line));border-radius:10px;overflow:hidden;
+  background:color-mix(in srgb,var(--active) 7%,var(--panel2))}
+.astrip h3{margin:0;padding:7px 12px;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--active);
   display:flex;align-items:center;gap:8px}
-.active-strip>h3 i{width:8px;height:8px;border-radius:50%;background:var(--active);
-  box-shadow:0 0 8px var(--active);animation:pulse 1.4s ease-in-out infinite}
+.astrip h3 i{width:8px;height:8px;border-radius:50%;background:var(--active);box-shadow:0 0 8px var(--active);animation:pulse 1.4s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-@keyframes flashHi{0%{box-shadow:inset 0 0 0 999px color-mix(in srgb,var(--warn) 16%,transparent)}
-  100%{box-shadow:inset 0 0 0 999px transparent}}
-.acards{display:flex;gap:8px;overflow-x:auto;padding:9px}
-.acard{flex:0 0 auto;min-width:210px;max-width:260px;background:var(--panel2);border:1px solid var(--line2);
-  border-left:3px solid var(--active);border-radius:3px;padding:8px 10px;cursor:pointer}
-.acard:hover{border-color:var(--tx3)}
-.acard .at{font-size:12px;font-weight:600;line-height:1.3;margin-bottom:3px}
-.acard .am{font-size:10px;color:var(--tx2);font-family:"IBM Plex Mono",monospace;line-height:1.5}
-.acard .au{font-size:9.5px;color:var(--tx3);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pill{display:inline-block;font:700 8.5px/1 "IBM Plex Mono",monospace;letter-spacing:.09em;text-transform:uppercase;
-  padding:3px 6px;border-radius:2px;vertical-align:middle}
+.acards{display:flex;gap:8px;overflow-x:auto;padding:0 10px 10px;scrollbar-width:none}
+.acards::-webkit-scrollbar{display:none}
+.acard{flex:0 0 auto;width:230px;background:var(--panel);border:1px solid var(--line2);border-left:3px solid var(--active);
+  border-radius:8px;padding:8px 10px;text-align:left}
+.acard .t{font-size:13px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.acard .m{font-size:11px;color:var(--tx2);margin-top:4px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+
+/* Tools row: search + filter chips + view toggle */
+.tools{display:flex;flex-direction:column;gap:8px;padding:6px 14px 10px;border-bottom:1px solid var(--line);background:var(--panel2)}
+.tools .row1{display:flex;gap:8px;align-items:center}
+.search{flex:1;display:flex;align-items:center;gap:8px;height:40px;padding:0 12px;border-radius:10px;background:var(--panel);border:1px solid var(--line2);color:var(--tx3)}
+.search input{flex:1;min-width:0;background:none;border:0;color:var(--tx);font:inherit;font-size:15px;outline:none}
+.search input::placeholder{color:var(--tx3)}
+.view{display:flex;border:1px solid var(--line2);border-radius:10px;overflow:hidden;flex:none}
+.view button{height:40px;padding:0 12px;display:flex;align-items:center;gap:6px;color:var(--tx2);font-weight:600;font-size:13px;background:var(--panel)}
+.view button[aria-pressed=true]{background:var(--tx);color:var(--bg)}
+.view button svg{font-size:17px}
+@media(max-width:440px){.view button .vl{display:none}.view button{padding:0 13px}}
+@media(min-width:920px){.view{display:none}}
+.fchips{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+.fchips::-webkit-scrollbar{display:none}
+.f{flex:none;height:34px;padding:0 12px;border-radius:99px;background:var(--panel);border:1px solid var(--line2);color:var(--tx2);
+  font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;transition:background .15s}
+.f svg{font-size:14px}
+.f[aria-pressed=true]{background:var(--tx);color:var(--bg);border-color:var(--tx);font-weight:600}
+.f.sepl{margin-left:6px}
+.f:focus-visible{outline:2px solid var(--warn);outline-offset:1px}
+
+/* Split: list + map. Phones toggle; desktop shows both. */
+.split{display:grid;grid-template-columns:1fr;position:relative}
+@media(min-width:920px){.split{grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
+  .split .list{border-right:1px solid var(--line);max-height:720px}
+  .split .mapcol{position:sticky;top:calc(var(--top) + var(--sat) + 10px);align-self:start}}
+@media(max-width:919px){
+  .split[data-view=list] .lmap{display:none}   /* the sheet stays in the DOM: it is fixed-position on phones */
+  .split[data-view=map] .list{display:none}
+  .split[data-view=map] .lmap{height:calc(100vh - var(--top) - var(--sat) - 150px);min-height:420px}}
+.list{overflow-y:auto;-webkit-overflow-scrolling:touch;min-height:240px}
+.empty{padding:40px 20px;text-align:center;color:var(--tx3);font-size:14px}
+.more{display:block;width:100%;padding:14px;color:var(--tx2);font-weight:600;background:var(--panel2);border-top:1px solid var(--line)}
+
+/* Rows */
+.rw{display:grid;grid-template-columns:44px 62px 1fr;gap:10px;align-items:start;padding:11px 12px 11px 10px;
+  border-bottom:1px solid var(--line);border-left:3px solid transparent;cursor:pointer;content-visibility:auto;contain-intrinsic-size:auto 78px;
+  transition:background .15s}
+.rw:nth-child(-n+14){animation:rowIn .32s cubic-bezier(.2,.7,.2,1) both}
+.rw:nth-child(2){animation-delay:30ms}.rw:nth-child(3){animation-delay:60ms}.rw:nth-child(4){animation-delay:90ms}
+.rw:nth-child(5){animation-delay:120ms}.rw:nth-child(6){animation-delay:150ms}.rw:nth-child(7){animation-delay:180ms}
+.rw:nth-child(8){animation-delay:210ms}.rw:nth-child(9){animation-delay:240ms}.rw:nth-child(10){animation-delay:270ms}
+@keyframes rowIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.rw:active{background:var(--panel3)}
+@media(hover:hover){.rw:hover{background:var(--panel2)}}
+.rw[aria-selected=true]{background:var(--panel3);border-left-color:var(--warn)}
+.rw.act{border-left-color:var(--active)}
+.rw.ex{opacity:.72}
+.rw.ex .tt{font-style:italic;font-weight:500;color:var(--tx2)}
+.ico{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;
+  background:color-mix(in srgb,var(--c) 18%,transparent);color:var(--c);border:1px solid color-mix(in srgb,var(--c) 35%,transparent)}
+.tm{font-size:11px;color:var(--tx3);line-height:1.35;padding-top:2px}
+.tm b{display:block;font-size:14px;color:var(--tx);font-weight:600}
+.tm .ag{color:var(--tx2)}
+.tm .ag.live{color:var(--ok)}
+.bd{min-width:0}
+.tt{font-size:14.5px;font-weight:600;line-height:1.3;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.lo{font-size:12.5px;color:var(--tx2);margin-top:3px;display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.lo svg{color:var(--tx3);font-size:12px}
+.un{font-size:11.5px;color:var(--tx3);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill{display:inline-flex;align-items:center;font:700 10px/1 "JetBrains Mono",monospace;letter-spacing:.07em;text-transform:uppercase;
+  padding:4px 7px;border-radius:6px;vertical-align:middle}
 .pill.active{background:color-mix(in srgb,var(--active) 22%,transparent);color:var(--active)}
 .pill.contained{background:color-mix(in srgb,var(--contained) 20%,transparent);color:var(--contained)}
 .pill.closed{background:color-mix(in srgb,var(--closed) 26%,transparent);color:var(--tx2)}
-.pill.unknown{background:var(--panel3);color:var(--tx3)}
-.grid{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1fr);gap:10px;align-items:start}
-@media(max-width:920px){.grid{grid-template-columns:1fr}}
-.pane{background:var(--panel);border:1px solid var(--line);border-radius:3px;overflow:hidden}
-.pane>h3{margin:0;padding:8px 12px;font:600 9.5px/1.5 "IBM Plex Mono",monospace;letter-spacing:.13em;
-  text-transform:uppercase;color:var(--tx3);background:var(--panel2);border-bottom:1px solid var(--line);
-  display:flex;justify-content:space-between;gap:10px}
-.filters{display:flex;flex-wrap:wrap;gap:5px;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--panel2)}
-.f{background:var(--panel3);color:var(--tx2);border:1px solid var(--line2);border-radius:2px;
-  font:500 10px/1 "IBM Plex Mono",monospace;letter-spacing:.07em;text-transform:uppercase;padding:5px 9px;cursor:pointer}
-.f:hover{color:var(--tx)}
-.f[aria-pressed=true]{background:var(--tx);color:var(--bg);border-color:var(--tx);font-weight:600}
-.f:focus-visible{outline:2px solid var(--warn);outline-offset:1px}
-.rows{max-height:640px;overflow-y:auto}
-.row{display:grid;grid-template-columns:13px 58px 1fr auto;gap:9px;align-items:start;
-  padding:8px 11px 8px 0;border-bottom:1px solid var(--line);cursor:pointer;border-left:3px solid transparent;
-  transition:background .18s;animation:rowIn .38s cubic-bezier(.2,.7,.2,1) both}
-.row:hover{background:var(--panel2)}
-.row[aria-selected=true]{background:var(--panel3);border-left-color:var(--warn)}
-.row.act{border-left-color:var(--active)}
-.row:focus-visible{outline:2px solid var(--warn);outline-offset:-2px}
-.tk{width:8px;height:8px;border-radius:1px;margin:4px 0 0 8px}
-.rt{font-size:10px;color:var(--tx3);line-height:1.35;padding-top:1px}
-.rt b{display:block;color:var(--tx2);font-weight:500}
-.rti{font-size:12px;font-weight:500;line-height:1.35}
-.rlo{font-size:10.5px;color:var(--tx2);margin-top:1px}
-.run{font-size:10px;color:var(--tx3);margin-top:2px}
-.rsq{font-size:9.5px;color:var(--tx3);padding:1px 6px;border:1px solid var(--line2);
-  border-radius:2px;white-space:nowrap;margin-right:10px}
-.mapwrap{padding:6px}
-/* Real Leaflet map, dark basemap. Leaflet paints its own canvas/tiles, so this
-   just reserves the box and re-skins Leaflet's chrome (zoom buttons, popups,
-   attribution) to match the console instead of its default light styling. */
-#leafletMap{height:460px;border-radius:2px;background:var(--bg)}
-.leaflet-container{background:var(--bg);font-family:"IBM Plex Sans",sans-serif}
-.leaflet-control-zoom a{background:var(--panel2)!important;color:var(--tx)!important;
-  border-color:var(--line2)!important}
-.leaflet-control-zoom a:hover{background:var(--panel3)!important}
-.leaflet-control-attribution{background:rgba(8,11,14,.72)!important;color:var(--tx3)!important;
-  font-size:9.5px!important}
+.pill.new{background:color-mix(in srgb,var(--bad) 22%,transparent);color:var(--bad)}
+.tag{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3);padding:2px 7px;border:1px solid var(--line2);border-radius:6px;white-space:nowrap}
+.tag.rep{color:var(--report);border-color:var(--tx3)}
+/* Fresh (<1h): a distinct state, red accent, heavier type, light pulse on the accent bar only (cheap to animate). */
+.rw.fresh{border-left-color:var(--bad);background:linear-gradient(90deg,color-mix(in srgb,var(--bad) 13%,transparent),transparent 70%)}
+.rw.fresh .tt{color:#ff6b6b;font-weight:800;font-size:15.5px}
+.rw.fresh .tm b,.rw.fresh .tm{color:#ff6b6b}
+.rw.fresh .ico{animation:glow 2.2s ease-in-out infinite}
+@keyframes glow{0%,100%{box-shadow:0 0 0 0 transparent}50%{box-shadow:0 0 14px color-mix(in srgb,var(--bad) 55%,transparent)}}
+
+/* Map */
+.mapcol{display:flex;flex-direction:column}
+.lmap{height:460px;background:var(--bg)}
+@media(max-width:919px){.lmap{height:380px}}
+.leaflet-container{background:var(--bg);font-family:Inter,sans-serif}
+.leaflet-control-zoom a{background:var(--panel2)!important;color:var(--tx)!important;border-color:var(--line2)!important;width:36px!important;height:36px!important;line-height:36px!important}
+.leaflet-control-attribution{background:rgba(11,15,20,.72)!important;color:var(--tx3)!important;font-size:9.5px!important}
 .leaflet-control-attribution a{color:var(--tx2)!important}
-.leaflet-popup-content-wrapper{background:var(--panel2);color:var(--tx);border-radius:3px;
-  box-shadow:0 4px 18px rgba(0,0,0,.5)}
+.leaflet-popup-content-wrapper{background:var(--panel2);color:var(--tx);border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.55)}
+.leaflet-popup-content{margin:10px 12px;font-size:13px}
 .leaflet-popup-tip{background:var(--panel2)}
 .leaflet-popup-close-button{color:var(--tx3)!important}
-.mpop .bdg{margin-bottom:4px}
-.mpop .pt{font-size:12.5px;font-weight:600;line-height:1.35;margin-bottom:4px}
-.mpop .pm{font-size:10.5px;color:var(--tx2);font-family:"IBM Plex Mono",monospace}
-.mk-active{animation:pulse 1.4s ease-in-out infinite}
-.detail{padding:11px 13px;border-top:1px solid var(--line);background:var(--panel2);min-height:132px;
-  scroll-margin-top:12px}
-.detail.flash{animation:flashHi 1s ease-out}
-.dh{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;margin-bottom:6px}
-.bdg{font:600 9.5px/1 "IBM Plex Mono",monospace;letter-spacing:.1em;text-transform:uppercase;padding:3px 7px;border-radius:2px}
-.dt{font-size:14px;font-weight:600}
-.dg{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-top:8px}
-.dl{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3)}
-.dv{font-size:12px;margin-top:1px;font-family:"IBM Plex Mono",monospace}
-.dn{font-size:11.5px;color:var(--tx2);margin-top:9px;padding-top:8px;border-top:1px solid var(--line);line-height:1.55}
-.dn b{color:var(--tx)}
-.dn a{color:var(--tech)}
-.srcbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:1px;
-  background:var(--line);border:1px solid var(--line);border-radius:3px;overflow:hidden}
-.src{background:var(--panel);padding:8px 11px;font-family:"IBM Plex Mono",monospace}
-.sn{font-size:10.5px;color:var(--tx)}
-.sm{font-size:9.5px;color:var(--tx3);margin-top:2px}
-.st{font-size:9px;letter-spacing:.09em;text-transform:uppercase;margin-top:3px}
-.legend{display:flex;flex-wrap:wrap;gap:12px;padding:8px 12px;border-top:1px solid var(--line);
-  background:var(--panel2);font-size:10px;color:var(--tx2);font-family:"IBM Plex Mono",monospace}
-.legend span{display:inline-flex;align-items:center;gap:6px}
-.legend i{width:9px;height:9px;border-radius:1px}
-footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
-/* ── Motion. Rows enter with a short fade-slide (staggered inline per row),
-   and the Austrian "younger than 1h" rows carry a slow glow so a genuinely
-   new call is visible at a glance without reading every line. Respects the
-   OS reduced-motion preference. ── */
-@keyframes rowIn{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
-@keyframes freshGlow{0%,100%{box-shadow:inset 3px 0 0 var(--bad)}
-  50%{box-shadow:inset 3px 0 0 var(--bad),0 0 16px color-mix(in srgb,var(--bad) 45%,transparent)}}
-@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+.mpop .pt{font-weight:600;line-height:1.3;margin:4px 0}
+.mpop .pm{font-size:11.5px;color:var(--tx2)}
+.mk{width:30px;height:30px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);display:flex;align-items:center;justify-content:center;
+  background:var(--c);border:2px solid #0b0f14;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+.mk svg{transform:rotate(45deg);font-size:15px;color:#0b0f14}
+.mk.sel{width:38px;height:38px;border-color:#ffd84d;box-shadow:0 0 0 3px rgba(255,216,77,.35),0 3px 10px rgba(0,0,0,.6)}
+.mk.sel svg{font-size:19px}
+.mk.act{animation:pulse 1.4s ease-in-out infinite}
+.mk.ex{opacity:.6}
+.mk.fresh{border-color:#ff5252;box-shadow:0 0 0 3px rgba(255,82,82,.35)}
+.mkw{background:none!important;border:0!important}
 
-/* ── Austria pane: its own visual language (icons, Slovenian labels, red
-   freshness state), a second map, and a Slovenian detail panel. ── */
-.at-pane{border-color:color-mix(in srgb,var(--bad) 30%,var(--line))}
-.at-sub{padding:6px 12px 7px;font-size:10.5px;color:var(--tx3);line-height:1.5;
-  border-bottom:1px solid var(--line);background:var(--panel2)}
-.at-counters{font-size:10px;letter-spacing:.06em;text-transform:none;color:var(--tx3)}
-.at-counters b{color:var(--tx);font-weight:600}
-.at-counters .hot{color:var(--bad)}
-.at-grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
-@media(max-width:920px){.at-grid{grid-template-columns:1fr}}
-.at-list{max-height:660px;overflow-y:auto;border-right:1px solid var(--line)}
-@media(max-width:920px){.at-list{border-right:none;max-height:520px}}
-#atMap{height:340px;border-radius:2px;background:var(--bg)}
-.at-detail{min-height:170px;scroll-margin-top:12px}
-.at-row{display:grid;grid-template-columns:30px 66px 1fr;gap:10px;align-items:start;
-  padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer;
-  border-left:3px solid transparent;transition:background .18s,transform .18s;
-  animation:rowIn .38s cubic-bezier(.2,.7,.2,1) both}
-.at-row:hover{background:var(--panel2);transform:translateX(2px)}
-.at-row:focus-visible{outline:2px solid var(--warn);outline-offset:-2px}
-.at-row[aria-selected=true]{background:var(--panel3);border-left-color:var(--warn)}
-.at-row.act{border-left-color:var(--active)}
-.at-row.ex{opacity:.7}
-.at-row.ex .att{font-style:italic;font-weight:400;color:var(--tx2)}
-.at-icon{font-size:20px;line-height:1.2;text-align:center;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}
-.at-t{font-size:10px;color:var(--tx3);line-height:1.35}
-.at-t b{display:block;color:var(--tx2);font-weight:500}
-.at-body .att{font-size:12.5px;font-weight:500;line-height:1.4}
-.at-body .atl{font-size:10.5px;color:var(--tx2);margin-top:2px}
-.at-body .atu{font-size:9.5px;color:var(--tx3);margin-top:3px;font-family:"IBM Plex Mono",monospace;line-height:1.45}
-.at-badge{font-size:9px;letter-spacing:.09em;text-transform:uppercase;color:var(--tx3);
-  padding:2px 6px;border:1px solid var(--line2);border-radius:2px;white-space:nowrap}
-/* The freshness alert: red, bold, a heavier and larger face than the normal
-   row — a genuinely different visual state, not a color tweak. */
-.at-row.fresh{background:linear-gradient(90deg,color-mix(in srgb,var(--bad) 16%,transparent),transparent 72%);
-  border-left-color:var(--bad);animation:rowIn .38s both,freshGlow 2.4s ease-in-out infinite}
-.at-row.fresh .att{color:#ff5e5e;font-weight:800;font-size:14px;letter-spacing:.005em}
-.at-row.fresh .at-t,.at-row.fresh .at-t b{color:#ff5e5e}
-.at-row.fresh .at-badge{color:var(--bad);border-color:var(--bad)}
-.at-badge.rep{color:var(--tx2);border-color:var(--tx3);margin-right:4px}
-.fresh-legend{color:var(--bad);font-weight:600}
-.at-kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px;margin-top:8px}
-.at-exp{margin-top:9px;padding:8px 10px;background:var(--panel3);border-left:3px solid var(--tx3);
-  border-radius:3px;font-size:11.5px;line-height:1.55;color:var(--tx2)}
-.at-exp b{color:var(--tx)}
-.at-mk-ex{opacity:.55}
+/* Detail sheet: inline under the map on desktop, a bottom sheet on phones. */
+.sheet{background:var(--panel2);border-top:1px solid var(--line)}
+.sheet .hd{display:none}
+.sheet .body{padding:12px 14px 14px}
+.sheet .ph{padding:34px 16px;text-align:center;color:var(--tx3);font-size:13px}
+@media(max-width:919px){
+  .sheet{position:fixed;left:0;right:0;bottom:0;z-index:60;max-height:78vh;display:flex;flex-direction:column;
+    border-radius:18px 18px 0 0;border:1px solid var(--line2);border-bottom:0;box-shadow:0 -12px 40px rgba(0,0,0,.6);
+    transform:translateY(105%);transition:transform .28s cubic-bezier(.2,.8,.2,1);padding-bottom:var(--sab)}
+  .sheet.open{transform:none}
+  .sheet .hd{display:flex;align-items:center;justify-content:center;padding:8px 0 2px;position:relative}
+  .sheet .hd i{width:40px;height:5px;border-radius:99px;background:var(--line2)}
+  .sheet .hd .x{position:absolute;right:8px;top:4px}
+  .sheet .body{overflow-y:auto;-webkit-overflow-scrolling:touch}
+  .sheet .ph{display:none}
+  .bk{position:fixed;inset:0;z-index:55;background:rgba(0,0,0,.45);opacity:0;pointer-events:none;transition:opacity .25s}
+  .bk.on{opacity:1;pointer-events:auto}}
+.dh{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+.bdg{font:700 11px/1 "JetBrains Mono",monospace;letter-spacing:.08em;text-transform:uppercase;padding:5px 8px;border-radius:7px;display:inline-flex;align-items:center;gap:5px}
+.dt{font-size:16px;font-weight:700;line-height:1.3;width:100%}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px 12px;margin-top:6px}
+.kv .l{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--tx3)}
+.kv .v{font-size:14px;margin-top:2px;color:var(--tx)}
+.exp{margin-top:10px;padding:10px 12px;background:var(--panel3);border-left:3px solid var(--tx3);border-radius:8px;font-size:13px;line-height:1.55;color:var(--tx2)}
+.exp b{color:var(--tx)}
+.raw{margin-top:10px;font-size:13px;line-height:1.55;color:var(--tx2);max-height:180px;overflow:auto}
+.acts{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.btn{height:40px;padding:0 14px;border-radius:10px;background:var(--panel3);border:1px solid var(--line2);color:var(--tx);font-weight:600;font-size:13px;
+  display:inline-flex;align-items:center;gap:7px;text-decoration:none}
+.btn.pri{background:var(--tx);color:var(--bg);border-color:var(--tx)}
+.btn:active{transform:scale(.97)}
+
+.legend{display:flex;flex-wrap:wrap;gap:10px 14px;padding:10px 14px;border-top:1px solid var(--line);background:var(--panel2);font-size:12px;color:var(--tx2)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend .d{width:9px;height:9px;border-radius:3px;display:inline-block}
+
+/* Sources */
+.srcs{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.srcs h3{margin:0;padding:10px 14px;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tx3);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.srcs h3 button{color:var(--tx2);font-size:12px;font-weight:600}
+.srcgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:1px;background:var(--line)}
+.src{background:var(--panel);padding:9px 12px}
+.src .n{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.src .s{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;margin-top:3px;font-weight:700}
+.src .m{font-size:11px;color:var(--tx3);margin-top:1px}
+footer{font-size:12px;color:var(--tx3);line-height:1.6;padding:0 6px}
+
+/* Toast */
+.toast{position:fixed;left:50%;bottom:calc(20px + var(--sab));transform:translate(-50%,20px);z-index:70;opacity:0;pointer-events:none;
+  background:var(--tx);color:var(--bg);font-weight:700;font-size:13px;padding:10px 16px;border-radius:99px;box-shadow:0 8px 24px rgba(0,0,0,.5);transition:all .25s}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
+<!-- Icon sprite: crisp, consistent glyphs on every platform (emoji render differently per OS). -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-fire" viewBox="0 0 24 24"><path d="M13.5 1.5c.4 3.4-1 5.3-2.8 7.3-1.2 1.3-2.4 2.7-2.4 4.8a3.7 3.7 0 0 0 1.9 3.3c-.2-1.9.8-2.9 2-4 1 1.2 3.3 2.6 3.3 5.1 0 1-.3 1.8-.8 2.4A7.5 7.5 0 0 0 19.5 13c0-4.8-3.4-6.3-3.4-10-.9.3-1.7 1-2.2 2-.2-1.4-.4-2.4-.4-3.5zM8.3 21.3A7.5 7.5 0 0 1 4.5 15c0-3.3 2-5.1 3.7-6.9-.1 1.9-.1 3.7 1 5.2-1.5 1.1-2.5 2.4-2.5 4.6 0 1.4.6 2.5 1.6 3.4z"/></symbol>
+  <symbol id="i-tech" viewBox="0 0 24 24"><path d="M22.7 19 13.6 9.9c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></symbol>
+  <symbol id="i-accident" viewBox="0 0 24 24"><path d="M18.9 6c-.2-.6-.8-1-1.4-1h-11c-.7 0-1.2.4-1.4 1L3 12v8c0 .6.4 1 1 1h1c.6 0 1-.4 1-1v-1h12v1c0 .6.4 1 1 1h1c.6 0 1-.4 1-1v-8l-2.1-6zM6.5 16a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm11 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zM5 11l1.5-4.5h11L19 11H5z"/></symbol>
+  <symbol id="i-rescue" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 6a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM4.9 6.3l3 3M16.1 9.3l3-3M4.9 17.7l3-3M16.1 14.7l3 3"/><path d="M4.2 5.6 8.5 9.9l-1.4 1.4L2.8 7zM19.8 5.6 15.5 9.9l1.4 1.4 4.3-4.3zM4.2 18.4l4.3-4.3 1.4 1.4L5.6 19.8zM19.8 18.4l-4.3-4.3-1.4 1.4 4.3 4.3z"/></symbol>
+  <symbol id="i-ems" viewBox="0 0 24 24"><path d="M9 3h6v6h6v6h-6v6H9v-6H3V9h6z"/></symbol>
+  <symbol id="i-heli" viewBox="0 0 24 24"><path d="M2 4h20v2h-9v2h2.5a6.5 6.5 0 0 1 6.5 6.5V16h-2a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3H2v-2h3v-3.5A2.5 2.5 0 0 1 7.5 8H11V6H2zm5.5 6a.5.5 0 0 0-.5.5V14h4v-4H7.5zm5.5 0v4h6.7a4.5 4.5 0 0 0-4.2-4H13z"/></symbol>
+  <symbol id="i-other" viewBox="0 0 24 24"><path d="M4 5h16v2.5H4zm0 5.75h16v2.5H4zM4 16.5h10V19H4z"/></symbol>
+  <symbol id="i-exercise" viewBox="0 0 24 24"><path d="M12 3 1 9l11 6 9-4.9V17h2V9L12 3zm-7 9.5V16c0 1.7 3.1 3 7 3s7-1.3 7-3v-3.5l-7 3.8-7-3.8z"/></symbol>
+  <symbol id="i-report" viewBox="0 0 24 24"><path d="M4 3h13v14a2 2 0 0 0 4 0V7h-2V3h1a2 2 0 0 1 2 2v12a4 4 0 0 1-4 4H6a2 2 0 0 1-2-2V3zm2 2v14h10.3A4 4 0 0 1 15 17V5H6zm2 2h6v4H8V7zm0 6h6v2H8v-2z"/></symbol>
+  <symbol id="i-weather" viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M17.65 6.35A8 8 0 1 0 19.7 14h-2.1a6 6 0 1 1-1.4-6.2L13 11h7V4l-2.35 2.35z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L12 13.4l-6.3 6.3-1.4-1.4L10.6 12 4.3 5.7l1.4-1.4L12 10.6l6.3-6.3z"/></symbol>
+  <symbol id="i-map" viewBox="0 0 24 24"><path d="M15 5 9 3 3 5v16l6-2 6 2 6-2V3l-6 2zm-1 13.6-4-1.3V5.4l4 1.3v11.9z"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M3 5h18v2.5H3zm0 5.75h18v2.5H3zM3 16.5h18V19H3z"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm.5 5v5.3l4 2.4-.8 1.2L11 13V7h1.5z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 24 24"><path d="M14 3h7v7h-2V6.4l-9.3 9.3-1.4-1.4L17.6 5H14V3zM5 5h6v2H7v10h10v-4h2v6H5V5z"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M11 2 4 13h5l-1 9 8-12h-5l1-8z"/></symbol>
+</svg>
+
+<header class="top">
+  <div>
+    <div class="brand">Vatro<b>CAD</b></div>
+    <div class="brandsub" id="scope">povezujem…</div>
+  </div>
+  <div class="led" id="feedled"><i></i><span id="feedtxt">povezujem…</span><span class="t" id="feedt"></span></div>
+  <button class="ibtn" id="refresh" aria-label="Osveži podatke" title="Osveži"><svg class="ic"><use href="#i-refresh"/></svg></button>
+  <div id="clockwrap"><div id="clock" class="mono">--:--:--</div><div class="cl mono">CEST</div></div>
+</header>
+
+<nav class="seg" id="seg">
+  <button data-c="at" aria-pressed="true">🇦🇹 Avstrija <span class="n" id="segAt">0</span></button>
+  <button data-c="hr" aria-pressed="false">🇭🇷 Hrvaška <span class="n" id="segHr">0</span></button>
+</nav>
+
 <div class="shell">
 
-<div class="topbar">
-  <div>
-    <div class="brand">Vatro<span>CAD</span></div>
-    <div class="brandsub" id="scope">connecting…</div>
-  </div>
-  <div class="sp"></div>
-  <div class="led" id="feedled"><i></i><span id="feedtxt">connecting…</span></div>
-  <button class="rf" id="refresh">Refresh now</button>
-  <div><div id="clock" class="mono">--:--:--</div><div class="cl mono">LOCAL CEST</div></div>
-</div>
-
-<div class="kpis" id="kpis"></div>
-
-<div class="active-strip" id="activewrap" hidden>
-  <h3><i></i><span>Active incidents · na terenu</span></h3>
-  <div class="acards" id="acards"></div>
-</div>
-
-<div class="grid">
-  <div class="pane">
-    <h3><span>Intervention log · chronological</span><span id="shown" class="mono"></span></h3>
-    <div class="filters" id="filters">
-      <button class="f" data-k="cat" data-v="all" aria-pressed="true">All</button>
-      <button class="f" data-k="cat" data-v="fire" aria-pressed="false">Požar</button>
-      <button class="f" data-k="cat" data-v="tech" aria-pressed="false">Tehnička</button>
-      <button class="f" data-k="cat" data-v="ems" aria-pressed="false">HMP</button>
-      <button class="f" data-k="cat" data-v="accident" aria-pressed="false">Nesreće</button>
-      <button class="f" data-k="cat" data-v="rescue" aria-pressed="false">HGSS</button>
-      <button class="f" data-k="cat" data-v="other" aria-pressed="false">Ostalo</button>
-      <span style="width:10px"></span>
-      <button class="f" data-k="reg" data-v="all" aria-pressed="true">All areas</button>
-      <button class="f" data-k="reg" data-v="sib" aria-pressed="false">Šibenik-Knin</button>
-      <button class="f" data-k="reg" data-v="med" aria-pressed="false">Međimurje</button>
-      <button class="f" data-k="reg" data-v="zag" aria-pressed="false">Zagreb</button>
-      <span style="width:10px"></span>
-      <button class="f" data-k="win" data-v="live" aria-pressed="true" id="winlive">Live · 12h</button>
-      <button class="f" data-k="win" data-v="recent" aria-pressed="false">Recent · 3d</button>
-    </div>
-    <div class="rows" id="rows"></div>
-    <div class="legend">
-      <span><i style="background:var(--fire)"></i>Požar</span>
-      <span><i style="background:var(--tech)"></i>Tehnička</span>
-      <span><i style="background:var(--ems)"></i>Asistencija HMP</span>
-      <span><i style="background:var(--accident)"></i>Nesreća s ozlijeđenima</span>
-      <span><i style="background:var(--rescue)"></i>Spašavanje (HGSS)</span>
-      <span><i style="background:var(--other)"></i>Ostalo</span>
-    </div>
-  </div>
-
-  <div class="pane">
-    <h3><span>Live map · Croatia</span><span class="mono">tap a marker or a row</span></h3>
-    <div class="mapwrap">
-      <div id="leafletMap" role="application" aria-label="Interactive map of Croatia with intervention markers"></div>
-    </div>
-    <div class="detail" id="detail"></div>
-  </div>
-</div>
-
-<div class="pane at-pane" id="atPane">
-  <h3><span>🇦🇹 Avstrija · gasilske intervencije v živo</span><span class="at-counters mono" id="atCounters"></span></h3>
-  <div class="at-sub">Spodnja in Zgornja Avstrija: uradni dispečerski sistemi v živo (Wastl NÖ, LFV OÖ) · Štajerska in Koroška ob slovenski meji: poročila
-    okrožnih poveljstev in gasilskih enot (📰, objavljena naknadno, z uro alarma iz poročila, hranjena 7 dni) ·
-    osveženo vsakih 15 min · <span class="fresh-legend">rdeče = dojava mlajša od 1 ure</span> · klik na vrstico ali oznako na zemljevidu odpre podrobnosti v slovenščini</div>
-  <div class="filters" id="atFilters">
-    <button class="f" data-at="all" aria-pressed="true">Vse dežele</button>
-    <button class="f" data-at="border" aria-pressed="false">🇸🇮 Ob meji SLO</button>
-    <button class="f" data-at="stmk" aria-pressed="false">Štajerska</button>
-    <button class="f" data-at="ktn" aria-pressed="false">Koroška</button>
-    <button class="f" data-at="ooe" aria-pressed="false">Zgornja Avstrija (OÖ)</button>
-    <button class="f" data-at="noe" aria-pressed="false">Spodnja Avstrija (NÖ)</button>
-    <span style="width:10px"></span>
-    <button class="f" data-attog="active" aria-pressed="false">Samo aktivne</button>
-    <button class="f" data-attog="ex" aria-pressed="true">🎓 Vaje</button>
-  </div>
-  <div class="at-grid">
-    <div class="at-list" id="atList" role="listbox" aria-label="Intervencije v Avstriji"></div>
+<!-- ═══ AUSTRIA ═══ -->
+<section class="country at" id="cAT">
+  <div class="chead">
     <div>
-      <div class="mapwrap"><div id="atMap" role="application" aria-label="Zemljevid intervencij v Avstriji"></div></div>
-      <div class="detail at-detail" id="atDetail"></div>
+      <h2>🇦🇹 Avstrija <span id="atCount" class="tag"></span></h2>
+      <div class="sub">NÖ/OÖ: dispečerski sistem v živo · Štajerska/Koroška: poročila enot ob meji · osveženo vsakih 15 min</div>
     </div>
   </div>
-  <div class="legend">
-    <span>🔥 Požar</span><span>🔧 Tehnično</span><span>🚧 Prometna nesreča</span><span>🆘 Reševanje oseb/živali</span>
-    <span>🚑 NMP · 🚁 helikopter</span><span>📋 Drugo</span><span>🎓 Vaja</span><span>📰 poročilo enote (Štajerska/Koroška)</span>
-    <span class="fresh-legend">🆕 mlajše od 1 ure</span>
+  <div class="chips" id="atChips"></div>
+  <div class="tools">
+    <div class="row1">
+      <label class="search"><svg class="ic"><use href="#i-search"/></svg><input id="atQ" type="search" placeholder="Išči kraj, vrsto, enoto…" autocomplete="off"></label>
+      <div class="view" id="atView"><button data-v="list" aria-pressed="true"><svg class="ic"><use href="#i-list"/></svg><span class="vl">Seznam</span></button><button data-v="map" aria-pressed="false"><svg class="ic"><use href="#i-map"/></svg><span class="vl">Zemljevid</span></button></div>
+    </div>
+    <div class="fchips" id="atFilters">
+      <button class="f" data-at="all" aria-pressed="true">Vse dežele</button>
+      <button class="f" data-at="border" aria-pressed="false">🇸🇮 Ob meji SLO</button>
+      <button class="f" data-at="stmk" aria-pressed="false">Štajerska</button>
+      <button class="f" data-at="ktn" aria-pressed="false">Koroška</button>
+      <button class="f" data-at="ooe" aria-pressed="false">Zgornja Avstrija</button>
+      <button class="f" data-at="noe" aria-pressed="false">Spodnja Avstrija</button>
+      <button class="f sepl" data-attog="active" aria-pressed="false"><svg class="ic"><use href="#i-bolt"/></svg>Samo aktivne</button>
+      <button class="f" data-attog="ex" aria-pressed="true"><svg class="ic"><use href="#i-exercise"/></svg>Vaje</button>
+    </div>
   </div>
-</div>
+  <div class="split" id="atSplit" data-view="list">
+    <div class="list" id="atList" role="listbox" aria-label="Intervencije v Avstriji"></div>
+    <div class="mapcol">
+      <div class="lmap" id="atMap" role="application" aria-label="Zemljevid intervencij v Avstriji"></div>
+      <div class="sheet" id="atSheet"><div class="hd"><i></i><button class="ibtn x" data-close aria-label="Zapri"><svg class="ic"><use href="#i-x"/></svg></button></div><div class="body"></div></div>
+    </div>
+  </div>
+  <div class="legend" id="atLegend"></div>
+</section>
 
-<div class="srcbar" id="srcbar"></div>
+<!-- ═══ CROATIA ═══ -->
+<section class="country hr" id="cHR" data-off>
+  <div class="chead">
+    <div>
+      <h2>🇭🇷 Hrvaška <span id="hrCount" class="tag"></span></h2>
+      <div class="sub">gasilske enote, ŽVOC, policija, HVZ, HGSS, HAC · javni viri · osveženo vsakih 15 min</div>
+    </div>
+  </div>
+  <div class="chips" id="hrChips"></div>
+  <div class="astrip" id="activewrap" hidden><h3><i></i>Aktivno na terenu</h3><div class="acards" id="acards"></div></div>
+  <div class="tools">
+    <div class="row1">
+      <label class="search"><svg class="ic"><use href="#i-search"/></svg><input id="hrQ" type="search" placeholder="Išči kraj, vrsto, enoto…" autocomplete="off"></label>
+      <div class="view" id="hrView"><button data-v="list" aria-pressed="true"><svg class="ic"><use href="#i-list"/></svg><span class="vl">Seznam</span></button><button data-v="map" aria-pressed="false"><svg class="ic"><use href="#i-map"/></svg><span class="vl">Zemljevid</span></button></div>
+    </div>
+    <div class="fchips" id="hrFilters">
+      <button class="f" data-k="win" data-v="live" aria-pressed="true"><svg class="ic"><use href="#i-clock"/></svg>V živo · 12 h</button>
+      <button class="f" data-k="win" data-v="recent" aria-pressed="false">Zadnji 3 dnevi</button>
+      <button class="f sepl" data-k="cat" data-v="all" aria-pressed="true">Vse vrste</button>
+      <button class="f" data-k="cat" data-v="fire" aria-pressed="false"><svg class="ic"><use href="#i-fire"/></svg>Požar</button>
+      <button class="f" data-k="cat" data-v="tech" aria-pressed="false"><svg class="ic"><use href="#i-tech"/></svg>Tehnično</button>
+      <button class="f" data-k="cat" data-v="ems" aria-pressed="false"><svg class="ic"><use href="#i-ems"/></svg>NMP</button>
+      <button class="f" data-k="cat" data-v="accident" aria-pressed="false"><svg class="ic"><use href="#i-accident"/></svg>Nesreče</button>
+      <button class="f" data-k="cat" data-v="rescue" aria-pressed="false"><svg class="ic"><use href="#i-rescue"/></svg>HGSS</button>
+      <span id="hrRegions" style="display:contents"></span>
+    </div>
+  </div>
+  <div class="split" id="hrSplit" data-view="list">
+    <div class="list" id="hrList" role="listbox" aria-label="Intervencije na Hrvaškem"></div>
+    <div class="mapcol">
+      <div class="lmap" id="hrMap" role="application" aria-label="Zemljevid intervencij na Hrvaškem"></div>
+      <div class="sheet" id="hrSheet"><div class="hd"><i></i><button class="ibtn x" data-close aria-label="Zapri"><svg class="ic"><use href="#i-x"/></svg></button></div><div class="body"></div></div>
+    </div>
+  </div>
+  <div class="legend" id="hrLegend"></div>
+</section>
+
+<div class="srcs">
+  <h3><span>Viri podatkov</span><button id="srcTog">pokaži</button></h3>
+  <div class="srcgrid" id="srcbar" hidden></div>
+</div>
 <footer id="foot"></footer>
 </div>
+<div class="bk" id="bk"></div>
+<div class="toast" id="toast"></div>
 
-<!-- Supabase JS client (UMD → global `supabase`) for the realtime websocket.
-     Loaded from a CDN; if it or the socket is unreachable the console falls back
-     to plain REST polling on its own, so the page still works fully offline-of-CDN. -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
-<!-- Leaflet: real tiled basemap instead of a hand-drawn coastline outline. -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-
 <script>
-// ── Supabase config ─────────────────────────────────────────────────────────
-// Publishable (read-only) key — safe to ship in the browser. Row-level security
-// permits SELECT only; writes are rejected. The poller uses the secret
-// service_role key, which lives only in CI, never here.
-const SB_URL = "https://ofzwkanpjhdvlygrhbum.supabase.co";
-const SB_KEY = "sb_publishable_l3UZaMzvgu_8nknqN-xB7g_VZauptFm";
-const LIVE_HOURS = 12, MAX_AGE_DAYS = 3;
-const AT_REPORT_DAYS = 7;   // Styria/Carinthia report rows live a week server-side (see vatrocad.py)
+// ── Supabase (read-only publishable key; RLS permits SELECT only) ────────────
+const SB_URL="https://ofzwkanpjhdvlygrhbum.supabase.co";
+const SB_KEY="sb_publishable_l3UZaMzvgu_8nknqN-xB7g_VZauptFm";
+const LIVE_HOURS=12, MAX_AGE_DAYS=3, AT_REPORT_DAYS=7, LIST_CAP=200;
 
-// Category colors as real hex — Leaflet paints its own canvas, so it can't read
-// the CSS custom properties above. Keep this in sync with :root by eye; both are
-// short lists and rarely change.
-const CATCOLOR={fire:"#ff6a35",tech:"#4d9de0",ems:"#b478ec",accident:"#ffd23f",
-                rescue:"#2ec4b6",other:"#7f8d9b"};
-const CN={fire:"Požar",tech:"Tehnička",ems:"Asistencija HMP",accident:"Nesreća",rescue:"Spašavanje HGSS",other:"Ostalo",
-          weather:"Upozorenje",summary:"Sažetak"};
-const SN={active:"Aktivan · na terenu",contained:"Lokaliziran",closed:"Ugašen · završen",unknown:"—"};
-// ── Austria feed: icons and Slovenian labels ────────────────────────────────
-const AT_ICON={fire:"🔥",tech:"🔧",accident:"🚧",rescue:"🆘",ems:"🚑",other:"📋",exercise:"🎓"};
-const AT_CAT_SL={fire:"Požar",tech:"Tehnično reševanje",accident:"Prometna nesreča",
-  rescue:"Reševanje oseb/živali",ems:"Nujna medicinska pomoč",other:"Drugo",exercise:"Vaja"};
-const AT_STATE_SL={ooe:"Zgornja Avstrija",noe:"Spodnja Avstrija",stmk:"Štajerska",ktn:"Koroška"};
-const AT_BORDER=new Set(["stmk","ktn"]);           // states on the Slovenian border
-// Report-based rows (Styria/Carinthia) versus live dispatch rows (NÖ/OÖ).
-const isReport=i=>!/^(NOE|OOE)-/.test(i.ref||"");
-const AT_STATUS_SL={active:"AKTIVNO",closed:"ZAKLJUČENO",contained:"LOKALIZIRANO",unknown:"—"};
-// The Austrian alarm-code scheme as NÖ's dispatch uses it: a letter for the
-// kind of call, a digit for its scale ("Alarmstufe"). OÖ uses plain
-// descriptive names instead of codes.
-const AT_KIND_SL={B:"B = Brand — požar",T:"T = Technischer Einsatz — tehnična intervencija",
-  S:"S = Schadstoff — nevarne snovi / iztekanje",SOF:"SOF = Sonderfall — druge naloge (podpora, izvidovanje, pomoč drugi službi)",
-  U:"U = Übung — vaja, ni resnična intervencija"};
-const AT_LEVEL_SL={0:"stopnja 0 — brez nevarnosti, rutinska ali podporna naloga",
-  1:"stopnja 1 — manjši obseg, običajno ena gasilska enota",
-  2:"stopnja 2 — srednji obseg, več enot, ogrožene osebe",
-  3:"stopnja 3 — večji obseg, enote iz sosednjih krajev",
-  4:"stopnja 4 — velik dogodek, številne enote z območja"};
-const atExplain=(raw,i)=>{const m=/^(SOF|[BTSU])(\d)\b/.exec(raw||"");
-  if(!m&&i&&isReport(i)) return "Poročilo gasilske enote (objavljeno naknadno) — brez dispečerske kode; datum in ura sta čas alarma iz besedila poročila, sicer čas objave.";
-  if(!m) return "Opisni naziv brez alarmne kode (Zgornja Avstrija kod ne uporablja).";
-  return `${AT_KIND_SL[m[1]]||m[1]} · ${AT_LEVEL_SL[m[2]]||("stopnja "+m[2])}`;};
+// ── Labels (Slovenian UI; the data itself stays in its source language) ─────
+const COL={fire:"#ff7a45",tech:"#5aa9ec",ems:"#c48cf5",accident:"#ffd84d",rescue:"#3ad3c4",other:"#9aa8b6",exercise:"#8fa0b0",weather:"#ffc233",summary:"#9aa8b6"};
+const ICON={fire:"i-fire",tech:"i-tech",ems:"i-ems",accident:"i-accident",rescue:"i-rescue",other:"i-other",exercise:"i-exercise",weather:"i-weather",summary:"i-other"};
+const CAT_SL={fire:"Požar",tech:"Tehnična intervencija",ems:"Nujna medicinska pomoč",accident:"Prometna nesreča",rescue:"Reševanje oseb/živali",other:"Drugo",exercise:"Vaja",weather:"Vremensko opozorilo",summary:"Povzetek"};
+const CAT_SHORT={fire:"Požar",tech:"Tehnično",ems:"NMP",accident:"Nesreča",rescue:"Reševanje",other:"Drugo",exercise:"Vaja"};
+const STATUS_SL={active:"AKTIVNO",contained:"LOKALIZIRANO",closed:"ZAKLJUČENO"};
+const HR_REG={sib:"Šibenik-Knin",med:"Medžimurje",zag:"Zagreb",kaz:"Karlovac",sdz:"Split",smz:"Sisak",zdz:"Zadar",kkz:"Koprivnica",vaz:"Varaždin",psz:"Požega",bbz:"Bjelovar",kzz:"Krapina",vpz:"Virovitica",nat:"nacionalno"};
+const AT_STATE={ooe:"Zgornja Avstrija",noe:"Spodnja Avstrija",stmk:"Štajerska",ktn:"Koroška"};
+const AT_BORDER=new Set(["stmk","ktn"]);
+const AT_SHORT={ooe:"OÖ",noe:"NÖ",stmk:"Štajerska",ktn:"Koroška"};
+const AT_KIND={B:"B = Brand — požar",T:"T = Technischer Einsatz — tehnična intervencija",S:"S = Schadstoff — nevarne snovi / iztekanje",
+  SOF:"SOF = Sonderfall — druge naloge (podpora, izvidovanje, pomoč drugi službi)",U:"U = Übung — vaja, ni resnična intervencija"};
+const AT_LEVEL={0:"stopnja 0 — brez nevarnosti, rutinska naloga",1:"stopnja 1 — manjši obseg, ena enota",2:"stopnja 2 — srednji obseg, več enot, ogrožene osebe",
+  3:"stopnja 3 — večji obseg, enote iz sosednjih krajev",4:"stopnja 4 — velik dogodek, številne enote"};
+const isReport=i=>i.country==="AT"&&!/^(NOE|OOE)-/.test(i.ref||"");
 const isHeli=i=>/Hubschrauber|Landeplatz|Notarzt/i.test(i.raw||"");
-const ageSl=i=>{const h=Math.max(0,Math.round(ageMs(i)/36e5));
-  return h<1?"pravkar":h<24?`pred ${h} h`:`pred ${Math.round(h/24)} d`;};
-let DATA={incidents:[],context:[],sources:[],austria:[]}, F={cat:"all",reg:"all",win:"live"}, sel=null;
-let atFilter="all", atShowEx=true, atOnlyActive=false, atSel=null, atRefit=false;   // Austria view state
-// ROWS is the single source of truth: raw DB rows keyed by id. REST fills it on
-// load; realtime patches it row-by-row. rebuild() derives everything from it.
-const ROWS=new Map();
-let lastSync=0, rtStatus="connecting";   // connecting | live | polling | offline
+const atExplain=i=>{const m=/^(SOF|[BTSU])(\d)\b/.exec(i.raw||"");
+  if(m) return `${AT_KIND[m[1]]||m[1]} · ${AT_LEVEL[m[2]]||("stopnja "+m[2])}`;
+  if(isReport(i)) return "Poročilo gasilske enote, objavljeno naknadno — brez dispečerske kode. Datum in ura sta čas alarma iz besedila poročila, sicer čas objave.";
+  return "Opisni naziv brez alarmne kode (Zgornja Avstrija kod ne uporablja).";};
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const cestHM=ms=>{const n=new Date(ms),p=x=>String(x).padStart(2,"0");
-  const c=new Date(n.getTime()+n.getTimezoneOffset()*6e4+2*36e5);return `${p(c.getHours())}:${p(c.getMinutes())}`;};
-
-// Event timestamp in CEST. No time on record → 00:00, so an undated-by-hour
-// event ages out of the live band sooner rather than lingering in it.
+const ic=n=>`<svg class="ic"><use href="#${n}"/></svg>`;
 const tsOf=(d,t)=>new Date(`${d}T${t&&/^\d{2}:\d{2}$/.test(t)?t:"00:00"}:00+02:00`).getTime();
-const nowMs=()=>Date.now();
-const ageMs=i=>nowMs()-tsOf(i.date,i.time);
+const ageMs=i=>Date.now()-tsOf(i.date,i.time);
 const isLive=i=>ageMs(i)<=LIVE_HOURS*36e5;
 const isRecent=i=>ageMs(i)<=MAX_AGE_DAYS*864e5;
-function ageLabel(i){
-  const h=Math.max(0,Math.round(ageMs(i)/36e5));
-  return h<1?"just now":h<24?`${h}h ago`:`${Math.round(h/24)}d ago`;
-}
+const isFresh=i=>ageMs(i)<=36e5&&i.category!=="exercise";
 const isActive=i=>i.status==="active"||i.status==="contained";
-const isVeryFresh=i=>ageMs(i)<=1*36e5;   // Austria's "younger than 1h" red alert state
+const ageShort=i=>{const m=Math.max(0,Math.round(ageMs(i)/6e4));if(m<60)return m<2?"zdaj":`${m} min`;const h=Math.round(m/60);return h<24?`${h} h`:`${Math.round(h/24)} d`;};
+const ageSl=i=>{const m=Math.max(0,Math.round(ageMs(i)/6e4));
+  if(m<60) return m<2?"pravkar":`pred ${m} min`; const h=Math.round(m/60); return h<24?`pred ${h} h`:`pred ${Math.round(h/24)} d`;};
+const dmy=d=>`${d.slice(8)}.${d.slice(5,7)}.`;
+const cestHM=ms=>{const n=new Date(ms),p=x=>String(x).padStart(2,"0");const c=new Date(n.getTime()+n.getTimezoneOffset()*6e4+2*36e5);return `${p(c.getHours())}:${p(c.getMinutes())}`;};
+const fold=s=>String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+const iconOf=i=>isHeli(i)?"i-heli":(ICON[i.category]||"i-other");
+const colorOf=i=>i.category==="exercise"?COL.exercise:(COL[i.category]||COL.other);
+const isPhone=()=>window.innerWidth<920;
+let toastT=null;
+function toast(msg){const t=$("toast");t.textContent=msg;t.classList.add("on");clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("on"),2600);}
 
-function vis(){
-  return DATA.incidents.filter(i =>
-    (F.cat==="all"||i.category===F.cat) && (F.reg==="all"||i.region===F.reg) &&
-    (F.win==="recent"?isRecent(i):isLive(i)));
-}
+// ── State ────────────────────────────────────────────────────────────────────
+const ROWS=new Map();
+let DATA={hr:[],ctx:[],at:[]};
+let lastSync=0, lastChange=0, rtStatus="connecting";
+const F={win:"live",cat:"all",reg:"all",q:""};
+const AF={state:"all",ex:true,active:false,q:""};
 
-function kpis(){
-  const inc=DATA.incidents, live=inc.filter(isLive), c=k=>live.filter(i=>i.category===k).length;
-  const active=inc.filter(i=>isActive(i)&&isRecent(i)).length;
-  const dig=DATA.context.find(x=>x.category==="summary" && x.source.startsWith("HVZ"));
-  const mup=DATA.context.find(x=>x.category==="summary" && x.source.startsWith("MUP"));
-  let nat="—", cas="—";
-  try{ nat=JSON.parse(dig?.raw||"{}").interventions ?? "—"; }catch(e){}
-  try{ const r=JSON.parse(mup?.raw||"{}"); cas=r.injured!=null?`${r.injured}`:"—"; }catch(e){}
-  const wx=DATA.context.filter(x=>x.category==="weather").length;
-  $("kpis").innerHTML=[
-    [`Live · ${LIVE_HOURS}h`,live.length,""],["Active on scene",active,active?"var(--active)":""],
-    ["Fire",c("fire"),"var(--fire)"],["Technical",c("tech"),"var(--tech)"],
-    ["HMP assist",c("ems"),"var(--ems)"],["Injury accidents",c("accident"),"var(--accident)"],
-    ["Fire ops last night",nat,""],["Injured on roads · RH",cas,"var(--accident)"]
-  ].map(([l,v,col])=>`<div class="kpi"><div class="l">${l}</div>
-      <div class="v mono" ${col?`style="color:${col}"`:""}>${v}</div></div>`).join("");
-}
+function mapRow(r){return {id:r.id,source:r.source,region:r.region,country:r.country||"HR",ref:r.ref,date:r.occurred,time:r.occurred_time,
+  category:r.category,status:r.status||"unknown",title:r.title,location:r.location,lat:r.lat,lon:r.lon,units:r.units,crew:r.crew,vehicles:r.vehicles,
+  raw:r.raw,link:r.link,first_seen:r.first_seen,last_seen:r.last_seen};}
 
-function activeStrip(){
-  const a=DATA.incidents.filter(i=>isActive(i)&&isRecent(i))
-    .sort((x,y)=>tsOf(y.date,y.time)-tsOf(x.date,x.time));
-  if(!a.length){ $("activewrap").hidden=true; return; }
-  $("activewrap").hidden=false;
-  $("acards").innerHTML=a.map(i=>`
-    <div class="acard" data-id="${esc(i.id)}" style="border-left-color:var(--${i.category})">
-      <div class="at">${esc(i.title)}</div>
-      <div class="am"><span class="pill ${i.status}">${esc(i.status)}</span> ${esc(i.location||"")} · ${esc(i.time||"—")}</div>
-      <div class="au mono">${esc(i.units||"—")}</div>
-    </div>`).join("");
-}
-
-// ── Map (Leaflet) ────────────────────────────────────────────────────────────
-// A real tiled basemap with pan/zoom, not a hand-drawn coastline. CARTO's
-// anonymous dark_all tiles (used originally) now return HTTP 200 but with an
-// "API KEY REQUIRED" watermark baked into the image — CARTO deprecated free
-// anonymous raster access, so the status code alone didn't catch it. Esri's
-// World_Dark_Gray Canvas tiles are still genuinely free, no key, no signup,
-// confirmed by fetching and looking at actual tiles over Croatia. Two layers,
-// Esri's own standard split: Base (terrain/roads) under Reference (labels),
-// so labels stay legible over the dark base. The view (pan/zoom) is left
-// alone after the first load so a realtime update never yanks it out from
-// under someone who's zoomed into one county.
-let map=null, markerLayer=null, mapInited=false;
-const markersById=new Map();
-let atMap=null, atMarkerLayer=null, atMapInited=false;
-const atMarkersById=new Map();
-const ESRI_ATTR='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ';
+// ── Map factory ──────────────────────────────────────────────────────────────
+const ESRI_ATTR='Tiles &copy; Esri';
 const ESRI_BASE="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}";
 const ESRI_REF ="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}";
-
 function darkMap(el,center,zoom){
-  const m=L.map(el,{scrollWheelZoom:true}).setView(center,zoom);
-  L.tileLayer(ESRI_BASE,{maxZoom:16,attribution:ESRI_ATTR}).addTo(m);
-  L.tileLayer(ESRI_REF,{maxZoom:16}).addTo(m);   // labels-only overlay, stacks above the base since it's added second
+  const m=L.map(el,{scrollWheelZoom:true,zoomControl:true,tap:false}).setView(center,zoom);
+  L.tileLayer(ESRI_BASE,{maxZoom:16,attribution:ESRI_ATTR,updateWhenIdle:true}).addTo(m);
+  L.tileLayer(ESRI_REF,{maxZoom:16,updateWhenIdle:true}).addTo(m);
   return m;
 }
-function initMap(){
-  if(typeof L==="undefined") return;   // CDN unreachable — log/KPIs still work
-  map=darkMap("leafletMap",[45.3,16.6],7);
-  markerLayer=L.layerGroup().addTo(map);
-  atMap=darkMap("atMap",[47.9,15.2],7);
-  atMarkerLayer=L.layerGroup().addTo(atMap);
+function pinIcon(i,sel){
+  const cls=["mk",sel?"sel":"",isActive(i)&&i.category!=="exercise"?"act":"",i.category==="exercise"?"ex":"",isFresh(i)?"fresh":""].join(" ");
+  const s=sel?38:30;
+  return L.divIcon({className:"mkw",iconSize:[s,s],iconAnchor:[s/2,s],popupAnchor:[0,-s+4],
+    html:`<div class="${cls}" style="--c:${colorOf(i)}">${ic(iconOf(i))}</div>`});
 }
 
-function renderMap(v){
-  if(!map) return;
-  markerLayer.clearLayers(); markersById.clear();
-  const placed=v.filter(i=>i.lat!=null&&i.lon!=null), seen={};
-  const bounds=[];
-  for(const i of placed){
-    let lat=i.lat, lon=i.lon;
-    // Calls geocode to settlement centroids, so a village brigade lands every
-    // marker on one point. Fan co-located calls out on a deterministic
-    // golden-angle spiral, in small degree offsets rather than pixels.
-    const key=`${lat.toFixed(3)},${lon.toFixed(3)}`;
-    const n=(seen[key]=(seen[key]||0)+1)-1;
-    if(n){ const a=n*2.399, r=0.006*Math.sqrt(n); lat+=r*Math.sin(a); lon+=r*Math.cos(a); }
-    const col=CATCOLOR[i.category]||"#7f8d9b";
-    const active=isActive(i), selected=sel===i.id;
-    const m=L.circleMarker([lat,lon],{
-      radius:selected?9:7, color:selected?"#ffc233":"#080b0e", weight:selected?2.6:1.2,
-      fillColor:col, fillOpacity:.92,
-      className:active?"mk-active":""
-    });
-    m.bindPopup(`<div class="mpop">
-        <span class="bdg" style="background:${col}2e;color:${col}">${esc(CN[i.category]||i.category)}</span>
-        ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}" style="margin-left:4px">${esc(i.status)}</span>`:""}
-        <div class="pt">${esc(i.title)}</div>
-        <div class="pm">${esc(i.location||"")} · ${esc(i.time||"—")}${n?" (stacked at this point)":""}</div>
-      </div>`, {closeButton:true});
-    m.on("click",()=>pick(i.id,{fly:false}));   // Leaflet already opens the popup
-    m.addTo(markerLayer);
-    markersById.set(i.id,m);
-    bounds.push([i.lat,i.lon]);
-  }
-  if(!mapInited && bounds.length){
-    map.fitBounds(bounds,{padding:[24,24],maxZoom:10});
-    mapInited=true;
-  }
+// ── Panel: one list + one map + one detail sheet, used for both countries ────
+function makePanel(cfg){
+  const P={sel:null,map:null,layer:null,markers:new Map(),inited:false,refit:false,shown:LIST_CAP,items:[]};
+  const listEl=$(cfg.list), sheet=$(cfg.sheet), body=sheet.querySelector(".body"), split=$(cfg.split);
+  P.initMap=()=>{ if(P.map||typeof L==="undefined") return;
+    P.map=darkMap(cfg.map,cfg.center,cfg.zoom); P.layer=L.layerGroup().addTo(P.map);
+  };
+  P.rowHTML=(i)=>{
+    const fresh=isFresh(i), rep=isReport(i), ex=i.category==="exercise";
+    const status=i.status&&i.status!=="unknown"&&!rep?`<span class="pill ${i.status}">${STATUS_SL[i.status]||esc(i.status)}</span>`:"";
+    return `<div class="rw ${fresh?"fresh":""} ${isActive(i)&&!ex?"act":""} ${ex?"ex":""}" role="option" tabindex="0" aria-selected="${P.sel===i.id}" data-id="${esc(i.id)}">
+      <div class="ico" style="--c:${colorOf(i)}">${ic(iconOf(i))}</div>
+      <div class="tm mono"><b>${esc(i.time||"—")}</b>${dmy(i.date)}<span class="ag ${isLive(i)?"live":""}" style="display:block">${fresh?"🆕 ":""}${ageShort(i)}</span></div>
+      <div class="bd">
+        <div class="tt">${rep?`<span class="tag rep">${ic("i-report")} ${esc(CAT_SHORT[i.category]||i.category)}</span>`:""}${esc(i.title)} ${status}</div>
+        <div class="lo">${ic("i-pin")}${esc(i.location||"—")}${cfg.regionTag(i)}</div>
+        ${i.units&&i.units!=="—"?`<div class="un">${esc(i.units)}</div>`:""}
+      </div></div>`;
+  };
+  P.render=()=>{
+    const v=P.items=cfg.items();
+    const slice=v.slice(0,P.shown);
+    listEl.innerHTML=v.length?slice.map(P.rowHTML).join("")+(v.length>P.shown?`<button class="more" data-more>Prikaži več (${v.length-P.shown})</button>`:"")
+      :`<div class="empty">Ni intervencij za ta filter.</div>`;
+    P.renderMap(v);
+    cfg.after&&cfg.after(v);
+  };
+  P.renderMap=(v)=>{
+    if(!P.map) return;
+    P.layer.clearLayers(); P.markers.clear();
+    const seen={}, bounds=[];
+    for(const i of v){
+      if(i.lat==null||i.lon==null) continue;
+      let lat=i.lat, lon=i.lon;
+      const key=`${lat.toFixed(3)},${lon.toFixed(3)}`, n=(seen[key]=(seen[key]||0)+1)-1;
+      if(n){const a=n*2.399,r=0.006*Math.sqrt(n);lat+=r*Math.sin(a);lon+=r*Math.cos(a);}
+      const m=L.marker([lat,lon],{icon:pinIcon(i,P.sel===i.id),keyboard:false});
+      m.bindPopup(`<div class="mpop"><span class="bdg" style="background:${colorOf(i)}2e;color:${colorOf(i)}">${ic(iconOf(i))}${esc(CAT_SL[i.category]||i.category)}</span>
+        <div class="pt">${esc(i.title)}</div><div class="pm">${esc(i.location||"")} · ${esc(i.time||"—")} · ${ageSl(i)}</div></div>`,{closeButton:false,autoPanPaddingBottomRight:[10,isPhone()?300:10]});
+      m.on("click",()=>P.select(i.id,{fly:false}));
+      m.addTo(P.layer); P.markers.set(i.id,m); bounds.push([i.lat,i.lon]);
+    }
+    // A hidden container (other country tab, list view) has no size; fitting it now
+    // would zoom to nothing. Leave inited=false so the first reveal fits instead.
+    const visible=P.map.getContainer().clientWidth>0;
+    if((!P.inited||P.refit)&&bounds.length&&visible){P.map.fitBounds(bounds,{padding:[28,28],maxZoom:cfg.maxZoom||9});P.inited=true;P.refit=false;}
+  };
+  P.detailHTML=cfg.detail;
+  P.openSheet=(i)=>{
+    body.innerHTML=cfg.detail(i);
+    sheet.classList.add("open"); if(isPhone()) $("bk").classList.add("on");
+    body.scrollTop=0;
+  };
+  P.isOpen=()=>sheet.classList.contains("open");
+  P.closeSheet=()=>{ sheet.classList.remove("open"); $("bk").classList.remove("on");
+    if(!isPhone()) body.innerHTML=`<div class="ph">Izberi intervencijo s seznama ali oznako na zemljevidu.</div>`; };
+  P.select=(id,opts={})=>{
+    const was=P.sel; P.sel=(P.sel===id&&!opts.keep)?null:id;
+    // Cheap selection: toggle attributes and swap two marker icons — never re-render 500 rows on a tap.
+    listEl.querySelectorAll(".rw[aria-selected=true]").forEach(r=>r.setAttribute("aria-selected","false"));
+    const r=listEl.querySelector(`.rw[data-id="${CSS.escape(P.sel||"")}"]`); if(r) r.setAttribute("aria-selected","true");
+    const all=[...DATA.hr,...DATA.ctx,...DATA.at];
+    if(was&&was!==P.sel){const o=all.find(x=>x.id===was), mo=P.markers.get(was); if(o&&mo) mo.setIcon(pinIcon(o,false));}
+    const found=all.find(x=>x.id===P.sel);
+    if(!found){P.closeSheet(); return;}
+    const mk=P.markers.get(P.sel); if(mk) mk.setIcon(pinIcon(found,true));
+    P.openSheet(found);
+    if(P.map&&found.lat!=null&&opts.fly!==false&&!(isPhone()&&split.dataset.view==="list")){
+      P.map.flyTo([found.lat,found.lon],Math.max(P.map.getZoom(),10),{duration:.5});
+      if(mk&&!mk.isPopupOpen()) mk.openPopup();
+    }
+  };
+  P.showOnMap=(id)=>{
+    if(isPhone()){ P.setView("map"); P.closeSheet(); }
+    const found=[...DATA.hr,...DATA.at].find(x=>x.id===id); const mk=P.markers.get(id);
+    setTimeout(()=>{ if(P.map){P.map.invalidateSize(); if(found?.lat!=null){P.map.flyTo([found.lat,found.lon],11,{duration:.5}); mk&&mk.openPopup();}} },80);
+  };
+  P.setView=(v)=>{ split.dataset.view=v; $(cfg.view).querySelectorAll("button").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.v===v)));
+    if(v==="map") setTimeout(()=>{P.map&&P.map.invalidateSize(); if(!P.inited) P.renderMap(P.items);},60); };
+  listEl.addEventListener("click",e=>{
+    const more=e.target.closest("[data-more]"); if(more){P.shown+=LIST_CAP;P.render();return;}
+    const r=e.target.closest(".rw"); if(r) P.select(r.dataset.id);
+  });
+  listEl.addEventListener("keydown",e=>{const r=e.target.closest(".rw"); if(r&&(e.key==="Enter"||e.key===" ")){e.preventDefault();P.select(r.dataset.id);}});
+  sheet.addEventListener("click",e=>{
+    if(e.target.closest("[data-close]")){P.select(P.sel);return;}
+    const b=e.target.closest("[data-map]"); if(b) P.showOnMap(b.dataset.map);
+  });
+  // Swipe down on the sheet handle closes it.
+  let y0=null; sheet.querySelector(".hd").addEventListener("touchstart",e=>{y0=e.touches[0].clientY;},{passive:true});
+  sheet.querySelector(".hd").addEventListener("touchmove",e=>{ if(y0!=null&&e.touches[0].clientY-y0>48){y0=null;P.select(P.sel);} },{passive:true});
+  $(cfg.view).addEventListener("click",e=>{const b=e.target.closest("button"); if(b) P.setView(b.dataset.v);});
+  P.closeSheet();
+  return P;
 }
 
-function draw(){
-  const v=vis();
-  $("shown").textContent=v.length+" shown";
-  $("rows").innerHTML = v.length ? v.map((i,idx)=>`
-    <div class="row ${isActive(i)?"act":""}" tabindex="0" role="option" aria-selected="${sel===i.id}" data-id="${esc(i.id)}" style="animation-delay:${Math.min(idx*22,440)}ms">
-      <div class="tk" style="background:var(--${i.category})"></div>
-      <div class="rt mono"><b>${esc(i.date.slice(8))}.${esc(i.date.slice(5,7))}.</b>${esc(i.time||"—")}<span style="display:block;color:${isLive(i)?"var(--ok)":"var(--tx3)"}">${ageLabel(i)}</span></div>
-      <div>
-        <div class="rti">${esc(i.title)} ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}">${esc(i.status)}</span>`:""}</div>
-        <div class="rlo mono">${esc(i.location||"")}</div>
-        <div class="run">${esc(i.units||"")}</div>
-      </div>
-      <div class="rsq mono">${esc(i.ref||"")}</div>
-    </div>`).join("")
-    : `<div style="padding:26px;text-align:center;color:var(--tx3)">No calls match this filter.</div>`;
-
-  renderMap(v);
-  kpis(); activeStrip();
-}
-
-// ── Austria: live feed + its own map + Slovenian detail panel. No window
-// toggle (the server already deletes anything past AT_MAX_AGE_DAYS); filters
-// are state, "only active", and whether training exercises are shown.
-// Calls under an hour old are flagged red so they can't be missed. ──
-function atVis(){
-  return DATA.austria.filter(i=>(atFilter==="all"||i.region===atFilter||(atFilter==="border"&&AT_BORDER.has(i.region)))
-      && (atShowEx||i.category!=="exercise") && (!atOnlyActive||i.status==="active"))
-    .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time));
-}
-const atIcon=i=>isHeli(i)?"🚁":(AT_ICON[i.category]||"⚠️");
-
-function drawAustria(){
-  const v=atVis(), all=DATA.austria;
-  const real=all.filter(i=>i.category!=="exercise");
-  const act=real.filter(i=>i.status==="active").length, hot=real.filter(isVeryFresh).length;
-  const ex=all.length-real.length;
-  $("atCounters").innerHTML=`<b class="${act?"hot":""}">${act}</b> aktivno · <b class="${hot?"hot":""}">${hot}</b> zadnja ura · ${ex} vaj · ${v.length}/${all.length} prikazano`;
-  $("atList").innerHTML = v.length ? v.map((i,idx)=>{
-    const fresh=isVeryFresh(i)&&i.category!=="exercise";
-    return `<div class="at-row ${fresh?"fresh":""} ${i.status==="active"?"act":""} ${i.category==="exercise"?"ex":""}"
-        role="option" tabindex="0" aria-selected="${atSel===i.id}" data-id="${esc(i.id)}" style="animation-delay:${Math.min(idx*22,440)}ms">
-      <div class="at-icon">${atIcon(i)}</div>
-      <div class="at-t mono"><b>${esc(i.date.slice(8))}.${esc(i.date.slice(5,7))}.</b>${esc(i.time||"—")}<span style="display:block">${fresh?"🆕 ":""}${ageSl(i)}</span></div>
-      <div class="at-body">
-        <div class="att">${isReport(i)?`<span class="at-badge rep">📰 ${esc(AT_CAT_SL[i.category]||i.category)}</span> `:""}${esc(i.title)} ${i.status&&i.status!=="unknown"&&!isReport(i)?`<span class="pill ${i.status}">${AT_STATUS_SL[i.status]||esc(i.status)}</span>`:""}</div>
-        <div class="atl">${esc(i.location||"")} · <span class="at-badge">${esc(AT_STATE_SL[i.region]||i.region)}</span></div>
-        <div class="atu">${esc(i.units||"")}${i.raw?" · "+esc(i.raw):""}</div>
-      </div>
-    </div>`;
-  }).join("")
-    : `<div style="padding:26px;text-align:center;color:var(--tx3)">Trenutno ni intervencij v tem filtru.</div>`;
-  atRenderMap(v);
-}
-
-function atRenderMap(v){
-  if(!atMap) return;
-  atMarkerLayer.clearLayers(); atMarkersById.clear();
-  const placed=v.filter(i=>i.lat!=null&&i.lon!=null), seen={}, bounds=[];
-  for(const i of placed){
-    let lat=i.lat, lon=i.lon;
-    const key=`${lat.toFixed(3)},${lon.toFixed(3)}`;
-    const n=(seen[key]=(seen[key]||0)+1)-1;
-    if(n){ const a=n*2.399, r=0.006*Math.sqrt(n); lat+=r*Math.sin(a); lon+=r*Math.cos(a); }
-    const ex=i.category==="exercise", fresh=isVeryFresh(i)&&!ex, selected=atSel===i.id;
-    const col=ex?"#8a93a0":(CATCOLOR[i.category]||"#7f8d9b");
-    const m=L.circleMarker([lat,lon],{
-      radius:selected?9:(fresh?8:6.5), color:selected?"#ffc233":(fresh?"#ff5e5e":"#080b0e"),
-      weight:selected?2.6:(fresh?2:1.2), fillColor:col, fillOpacity:ex?.5:.92,
-      className:(i.status==="active"&&!ex)?"mk-active":(ex?"at-mk-ex":"")
-    });
-    m.bindPopup(`<div class="mpop">
-        <span class="bdg" style="background:${col}2e;color:${col}">${atIcon(i)} ${esc(AT_CAT_SL[i.category]||i.category)}</span>
-        ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}" style="margin-left:4px">${AT_STATUS_SL[i.status]||i.status}</span>`:""}
-        <div class="pt">${esc(i.title)}</div>
-        <div class="pm">${esc(i.location||"")} · ${esc(i.time||"—")} · ${ageSl(i)}</div>
-      </div>`,{closeButton:true});
-    m.on("click",()=>atPick(i.id,{fly:false}));
-    m.addTo(atMarkerLayer); atMarkersById.set(i.id,m); bounds.push([i.lat,i.lon]);
-  }
-  if((!atMapInited||atRefit) && bounds.length){ atMap.fitBounds(bounds,{padding:[24,24],maxZoom:9}); atMapInited=true; atRefit=false; }
-}
+// ── Detail renderers ─────────────────────────────────────────────────────────
+const actions=i=>`<div class="acts">${i.lat!=null?`<button class="btn pri" data-map="${esc(i.id)}">${ic("i-map")} Na zemljevidu</button>`:""}
+  ${i.link?`<a class="btn" href="${esc(i.link)}" target="_blank" rel="noopener">${ic("i-ext")} Odpri vir</a>`:""}</div>`;
+const head=i=>`<div class="dh"><span class="bdg" style="background:${colorOf(i)}2e;color:${colorOf(i)}">${ic(iconOf(i))}${esc(CAT_SL[i.category]||i.category)}</span>
+  ${i.status&&i.status!=="unknown"&&!isReport(i)?`<span class="pill ${i.status}">${STATUS_SL[i.status]||esc(i.status)}</span>`:""}
+  ${isFresh(i)?`<span class="pill new">🆕 novo</span>`:""}<div class="dt">${esc(i.title)}</div></div>`;
+const kv=pairs=>`<div class="kv">${pairs.filter(p=>p).map(([l,v])=>`<div><div class="l">${l}</div><div class="v">${v}</div></div>`).join("")}</div>`;
 
 function atDetail(i){
-  const d=$("atDetail");
-  if(!i){ d.innerHTML=`<div style="color:var(--tx3);font-size:12px;padding-top:30px;text-align:center">
-    Izberi intervencijo s seznama ali oznako na zemljevidu.</div>`; return; }
-  const col=i.category==="exercise"?"#8a93a0":(CATCOLOR[i.category]||"#7f8d9b");
-  d.innerHTML=`
-    <div class="dh"><span class="bdg" style="background:${col}2e;color:${col}">${atIcon(i)} ${esc(AT_CAT_SL[i.category]||i.category)}</span>
-      ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}">${AT_STATUS_SL[i.status]||esc(i.status)}</span>`:""}
-      ${isVeryFresh(i)?`<span class="pill active">🆕 NOVO</span>`:""}
-      <span class="dt">${esc(i.title)}</span></div>
-    <div class="at-kv">
-      <div><div class="dl">Kraj</div><div class="dv">${esc(i.location||"—")}</div></div>
-      <div><div class="dl">Zvezna dežela</div><div class="dv">${esc(AT_STATE_SL[i.region]||i.region)}</div></div>
-      <div><div class="dl">Datum dojave</div><div class="dv">${esc(i.date)}</div></div>
-      <div><div class="dl">Ura dojave</div><div class="dv">${esc(i.time||"—")} · ${ageSl(i)}</div></div>
-      <div><div class="dl">Stanje</div><div class="dv">${isReport(i)?"ZAKLJUČENO (poročilo)":(AT_STATUS_SL[i.status]||"—")}</div></div>
-      <div><div class="dl">Vrsta vira</div><div class="dv">${isReport(i)?"📰 poročilo enote":"📡 dispečerski dnevnik v živo"}</div></div>
-      <div><div class="dl">Št. enot</div><div class="dv">${i.vehicles??(i.units?i.units.split(",").length:"—")}</div></div>
-      <div><div class="dl">Referenca</div><div class="dv">${esc(i.ref||"—")}</div></div>
-      <div><div class="dl">Vir</div><div class="dv">${esc(i.source)}</div></div>
-    </div>
-    <div class="at-exp"><b>Koda in stopnja:</b> ${esc(atExplain(i.raw,i))}<br>
-      <b>${isReport(i)?"Izvleček poročila (nemško)":"Izvirni nemški zapis"}:</b> ${esc(i.raw||"—")}<br>
-      <b>Vrsta:</b> ${esc(AT_CAT_SL[i.category]||i.category)}${isHeli(i)?" · 🚁 v besedilu je omenjen helikopter / zdravnik NMP":""}</div>
-    <div class="dn"><b>Alarmirane enote:</b> ${esc(i.units||"—")}<br>
-      ${i.link?`<b>Uradna stran:</b> <a href="${esc(i.link)}" target="_blank" rel="noopener">odpri vir</a>`:""}</div>`;
+  return head(i)+kv([["Kraj",esc(i.location||"—")],["Zvezna dežela",esc(AT_STATE[i.region]||i.region)],
+    ["Datum dojave",esc(i.date)],["Ura dojave",`${esc(i.time||"—")} · ${ageSl(i)}`],
+    ["Stanje",isReport(i)?"ZAKLJUČENO (poročilo)":(STATUS_SL[i.status]||"—")],["Vrsta vira",isReport(i)?"📰 poročilo enote":"📡 dispečerski dnevnik v živo"],
+    ["Št. enot",String(i.vehicles??(i.units&&i.units!=="—"?i.units.split(",").length:"—"))],["Referenca",esc(i.ref||"—")],["Vir",esc(i.source)]])+
+    `<div class="exp"><b>Koda in stopnja:</b> ${esc(atExplain(i))}<br><b>Vrsta:</b> ${esc(CAT_SL[i.category]||i.category)}${isHeli(i)?" · 🚁 v besedilu je omenjen helikopter / zdravnik NMP":""}
+      ${i.units&&i.units!=="—"?`<br><b>Alarmirane enote:</b> ${esc(i.units)}`:""}</div>
+    <div class="raw"><b>${isReport(i)?"Izvleček poročila (nemško)":"Izvirni nemški zapis"}:</b> ${esc(i.raw||"—")}</div>`+actions(i);
+}
+function hrDetail(i){
+  return head(i)+kv([["Kraj",esc(i.location||"—")],["Regija",esc(HR_REG[i.region]||i.region||"—")],["Datum",esc(i.date)],["Dojava",`${esc(i.time||"—")} · ${ageSl(i)}`],
+    ["Stanje",STATUS_SL[i.status]||"—"],["Posadka / vozila",`${i.crew??"—"}${i.vehicles?" · "+i.vehicles+" voz.":""}`],["Referenca",esc(i.ref||"—")],["Vir",esc(i.source)]])+
+    (i.units&&i.units!=="—"?`<div class="exp"><b>Enote:</b> ${esc(i.units)}</div>`:"")+
+    (i.raw?`<div class="raw">${esc(i.raw)}</div>`:"")+actions(i);
 }
 
-function atPick(id,opts){
-  const was=atSel; atSel = atSel===id ? null : id;
-  drawAustria();
-  const found=DATA.austria.find(i=>i.id===atSel);
-  atDetail(found);
-  if(atSel && atSel!==was){
-    const d=$("atDetail");
-    d.scrollIntoView({behavior:"smooth",block:"nearest"});
-    d.classList.remove("flash"); void d.offsetWidth; d.classList.add("flash");
-    if(atMap && found?.lat!=null && (!opts||opts.fly!==false)) atMap.flyTo([found.lat,found.lon],Math.max(atMap.getZoom(),10),{duration:.6});
-    const mk=atMarkersById.get(atSel); if(mk && !mk.isPopupOpen()) mk.openPopup();
-  }
-}
-$("atList").addEventListener("click",e=>{const r=e.target.closest(".at-row"); if(r)atPick(r.dataset.id);});
-$("atList").addEventListener("keydown",e=>{const r=e.target.closest(".at-row");
-  if(r&&(e.key==="Enter"||e.key===" ")){e.preventDefault();atPick(r.dataset.id);}});
-$("atFilters").addEventListener("click",e=>{
-  const b=e.target.closest(".f"); if(!b) return;
-  if(b.dataset.at){
-    atFilter=b.dataset.at; atRefit=true;          // re-frame the map on the chosen state
-    document.querySelectorAll('#atFilters .f[data-at]').forEach(o=>o.setAttribute("aria-pressed",String(o===b)));
-  }else if(b.dataset.attog==="active"){ atOnlyActive=!atOnlyActive; b.setAttribute("aria-pressed",String(atOnlyActive)); }
-  else if(b.dataset.attog==="ex"){ atShowEx=!atShowEx; b.setAttribute("aria-pressed",String(atShowEx)); }
-  atSel=null; drawAustria(); atDetail(null);
+// ── Panels ───────────────────────────────────────────────────────────────────
+const AT=makePanel({list:"atList",map:"atMap",sheet:"atSheet",split:"atSplit",view:"atView",center:[47.3,14.8],zoom:7,maxZoom:9,detail:atDetail,
+  regionTag:i=>`<span class="tag">${esc(AT_SHORT[i.region]||i.region)}</span>`,
+  items:()=>DATA.at.filter(i=>(AF.state==="all"||i.region===AF.state||(AF.state==="border"&&AT_BORDER.has(i.region)))
+      &&(AF.ex||i.category!=="exercise")&&(!AF.active||i.status==="active")
+      &&(!AF.q||fold([i.title,i.location,i.units,i.raw,CAT_SL[i.category],AT_STATE[i.region]].join(" ")).includes(AF.q)))
+    .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time)),
+  after:v=>{const all=DATA.at, real=all.filter(i=>i.category!=="exercise");
+    const act=real.filter(i=>i.status==="active").length, hot=real.filter(isFresh).length, rep=all.filter(isReport).length, ex=all.length-real.length;
+    $("atChips").innerHTML=[["Aktivno",act,"i-bolt",act>0],["Zadnja ura",hot,"i-clock",hot>0],["Požari",real.filter(i=>i.category==="fire").length,"i-fire"],
+      ["Nesreče",real.filter(i=>i.category==="accident").length,"i-accident"],["NMP",real.filter(i=>i.category==="ems"||isHeli(i)).length,"i-ems"],["Ob meji SLO",all.filter(i=>AT_BORDER.has(i.region)).length,"i-pin"],["Vaje",ex,"i-exercise"],["Poročila",rep,"i-report"]]
+      .map(([l,v,ic_,hot_])=>`<div class="chip ${hot_?"hot":""}"><div class="l">${l}</div><div class="v mono">${ic(ic_)}${v}</div></div>`).join("");
+    $("atCount").textContent=`${v.length} / ${all.length}`; $("segAt").textContent=act;}
 });
-atDetail(null);
-
-function detail(i){
-  const d=$("detail");
-  if(!i){ d.innerHTML=`<div style="color:var(--tx3);font-size:12px;padding-top:30px;text-align:center">
-    Select a call from the log or a marker on the map.</div>`; return; }
-  d.innerHTML=`
-    <div class="dh"><span class="bdg" style="background:color-mix(in srgb,var(--${i.category}) 18%,transparent);
-      color:var(--${i.category})">${CN[i.category]||i.category}</span>
-      ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}">${esc(i.status)}</span>`:""}
-      <span class="dt">${esc(i.title)}</span></div>
-    <div class="dg">
-      <div><div class="dl">Ref</div><div class="dv">${esc(i.ref||"—")}</div></div>
-      <div><div class="dl">Date</div><div class="dv">${esc(i.date)}</div></div>
-      <div><div class="dl">Dojava</div><div class="dv">${esc(i.time||"—")}</div></div>
-      <div><div class="dl">Location</div><div class="dv">${esc(i.location||"—")}</div></div>
-      <div><div class="dl">Status</div><div class="dv">${esc(SN[i.status]||i.status||"—")}</div></div>
-      <div><div class="dl">Crew</div><div class="dv">${i.crew??"—"}${i.vehicles?" · "+i.vehicles+" veh":""}</div></div>
-    </div>
-    <div class="dn"><b>Units:</b> ${esc(i.units||"—")}<br>
-      <b>Source:</b> ${esc(i.source)} ${i.link?`· <a href="${esc(i.link)}" target="_blank" rel="noopener">open</a>`:""}
-      ${i.raw?`<br><br>${esc(i.raw)}`:""}</div>`;
-}
-
-// Selecting a call must actually show its detail — on a phone the map sits
-// between the log and the detail panel, well off-screen, so scroll it into
-// view (a no-op on desktop, where it's already visible) and flash it so the
-// update is obvious even without scrolling.
-function pick(id,opts){
-  const wasSel=sel;
-  sel = sel===id ? null : id;
-  draw();
-  const found=[...DATA.incidents,...DATA.context].find(i=>i.id===sel);
-  detail(found);
-  if(sel && sel!==wasSel){
-    const d=$("detail");
-    d.scrollIntoView({behavior:"smooth",block:"nearest"});
-    d.classList.remove("flash"); void d.offsetWidth; d.classList.add("flash");
-    if(map && found?.lat!=null && (!opts||opts.fly!==false)){
-      map.flyTo([found.lat,found.lon],Math.max(map.getZoom(),9),{duration:.6});
-    }
-    const mk=markersById.get(sel);
-    if(mk && !mk.isPopupOpen()) mk.openPopup();
-  }
-}
-$("rows").addEventListener("click",e=>{const r=e.target.closest(".row"); if(r)pick(r.dataset.id);});
-$("rows").addEventListener("keydown",e=>{const r=e.target.closest(".row");
-  if(r&&(e.key==="Enter"||e.key===" ")){e.preventDefault();pick(r.dataset.id);}});
-$("acards").addEventListener("click",e=>{const c=e.target.closest(".acard"); if(c)pick(c.dataset.id);});
-$("filters").addEventListener("click",e=>{
-  const b=e.target.closest(".f"); if(!b)return;
-  F[b.dataset.k]=b.dataset.v; sel=null;
-  document.querySelectorAll(`.f[data-k="${b.dataset.k}"]`).forEach(o=>
-    o.setAttribute("aria-pressed",String(o===b)));
-  draw(); detail(null);
+const HR=makePanel({list:"hrList",map:"hrMap",sheet:"hrSheet",split:"hrSplit",view:"hrView",center:[44.8,16.2],zoom:7,maxZoom:10,detail:hrDetail,
+  regionTag:i=>HR_REG[i.region]?`<span class="tag">${esc(HR_REG[i.region])}</span>`:"",
+  items:()=>DATA.hr.filter(i=>(F.cat==="all"||i.category===F.cat)&&(F.reg==="all"||i.region===F.reg)&&(F.win==="recent"?isRecent(i):isLive(i))
+      &&(!F.q||fold([i.title,i.location,i.units,i.raw,CAT_SL[i.category],HR_REG[i.region]].join(" ")).includes(F.q)))
+    .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time)),
+  after:v=>{const inc=DATA.hr, live=inc.filter(isLive), c=k=>live.filter(i=>i.category===k).length, act=inc.filter(isActive).length;
+    $("hrChips").innerHTML=[["V živo · 12 h",live.length,"i-clock"],["Aktivno",act,"i-bolt",act>0],["Požari",c("fire"),"i-fire"],["Tehnično",c("tech"),"i-tech"],["NMP",c("ems"),"i-ems"],["Nesreče",c("accident"),"i-accident"],["HGSS",c("rescue"),"i-rescue"]]
+      .map(([l,v,ic_,hot_])=>`<div class="chip ${hot_?"hot":""}"><div class="l">${l}</div><div class="v mono">${ic(ic_)}${v}</div></div>`).join("");
+    $("hrCount").textContent=`${v.length} / ${inc.length}`; $("segHr").textContent=act;
+    const a=inc.filter(isActive).sort((x,y)=>tsOf(y.date,y.time)-tsOf(x.date,x.time));
+    $("activewrap").hidden=!a.length;
+    $("acards").innerHTML=a.map(i=>`<button class="acard" data-id="${esc(i.id)}" style="border-left-color:${colorOf(i)}"><div class="t">${ic(iconOf(i))} ${esc(i.title)}</div>
+      <div class="m"><span class="pill ${i.status}">${STATUS_SL[i.status]||i.status}</span>${esc(i.location||"")} · ${esc(i.time||"—")}</div></button>`).join("");
+    // Region chips from the data itself, most active first.
+    const cnt={}; inc.forEach(i=>{cnt[i.region]=(cnt[i.region]||0)+1;});
+    const regs=Object.keys(cnt).filter(r=>HR_REG[r]).sort((a,b)=>cnt[b]-cnt[a]).slice(0,8);
+    $("hrRegions").innerHTML=`<button class="f sepl" data-k="reg" data-v="all" aria-pressed="${F.reg==="all"}">Vse regije</button>`+
+      regs.map(r=>`<button class="f" data-k="reg" data-v="${r}" aria-pressed="${F.reg===r}">${esc(HR_REG[r])} <span class="n" style="opacity:.7">${cnt[r]}</span></button>`).join("");}
 });
 
-// Map one Supabase row (DB column names) onto the shape the console renders.
-function mapRow(r){
-  return {id:r.id,source:r.source,region:r.region,country:r.country||"HR",ref:r.ref,
-    date:r.occurred,time:r.occurred_time,
-    category:r.category,status:r.status||"unknown",title:r.title,location:r.location,
-    lat:r.lat,lon:r.lon,units:r.units,crew:r.crew,vehicles:r.vehicles,raw:r.raw,link:r.link,
-    first_seen:r.first_seen,last_seen:r.last_seen};
-}
+// Legends
+$("atLegend").innerHTML=[["fire","Požar"],["tech","Tehnično"],["accident","Prometna nesreča"],["rescue","Reševanje"],["ems","NMP · 🚁 helikopter"],["other","Drugo"],["exercise","Vaja"]]
+  .map(([k,l])=>`<span><i class="d" style="background:${COL[k]}"></i>${ic(ICON[k])} ${l}</span>`).join("")+`<span>${ic("i-report")} poročilo enote (Štajerska/Koroška)</span><span style="color:var(--bad);font-weight:600">🆕 mlajše od 1 ure</span>`;
+$("hrLegend").innerHTML=[["fire","Požar"],["tech","Tehnično"],["ems","Asistenca NMP"],["accident","Nesreča s poškodovanimi"],["rescue","Reševanje (HGSS)"],["other","Drugo"]]
+  .map(([k,l])=>`<span><i class="d" style="background:${COL[k]}"></i>${ic(ICON[k])} ${l}</span>`).join("");
 
+// ── Filter handlers ──────────────────────────────────────────────────────────
+$("atFilters").addEventListener("click",e=>{const b=e.target.closest(".f"); if(!b) return;
+  if(b.dataset.at){AF.state=b.dataset.at;AT.refit=true;document.querySelectorAll('#atFilters .f[data-at]').forEach(o=>o.setAttribute("aria-pressed",String(o===b)));}
+  else if(b.dataset.attog==="active"){AF.active=!AF.active;b.setAttribute("aria-pressed",String(AF.active));}
+  else if(b.dataset.attog==="ex"){AF.ex=!AF.ex;b.setAttribute("aria-pressed",String(AF.ex));}
+  AT.sel=null; AT.closeSheet(); AT.shown=LIST_CAP; AT.render();});
+$("hrFilters").addEventListener("click",e=>{const b=e.target.closest(".f"); if(!b) return;
+  F[b.dataset.k]=b.dataset.v; document.querySelectorAll(`#hrFilters .f[data-k="${b.dataset.k}"]`).forEach(o=>o.setAttribute("aria-pressed",String(o===b)));
+  HR.sel=null; HR.closeSheet(); HR.shown=LIST_CAP; HR.refit=b.dataset.k==="reg"; HR.render();});
+let qT=null;
+$("atQ").addEventListener("input",e=>{clearTimeout(qT);qT=setTimeout(()=>{AF.q=fold(e.target.value.trim());AT.shown=LIST_CAP;AT.render();},120);});
+$("hrQ").addEventListener("input",e=>{clearTimeout(qT);qT=setTimeout(()=>{F.q=fold(e.target.value.trim());HR.shown=LIST_CAP;HR.render();},120);});
+$("acards").addEventListener("click",e=>{const c=e.target.closest(".acard"); if(c) HR.select(c.dataset.id,{keep:true});});
+$("bk").addEventListener("click",()=>{AT.sel&&AT.select(AT.sel);HR.sel&&HR.select(HR.sel);});
+$("seg").addEventListener("click",e=>{const b=e.target.closest("button"); if(!b) return;
+  document.querySelectorAll("#seg button").forEach(o=>o.setAttribute("aria-pressed",String(o===b)));
+  const c=b.dataset.c; $("cAT").toggleAttribute("data-off",c!=="at"); $("cHR").toggleAttribute("data-off",c!=="hr");
+  const P=c==="at"?AT:HR; setTimeout(()=>{P.map&&P.map.invalidateSize(); if(!P.inited) P.renderMap(P.items);},60);
+  window.scrollTo({top:0,behavior:"smooth"});});
+$("srcTog").addEventListener("click",()=>{const b=$("srcbar"); b.hidden=!b.hidden; $("srcTog").textContent=b.hidden?"pokaži":"skrij";});
+
+// ── Sources health ───────────────────────────────────────────────────────────
 function srcTiers(){
-  // Derive the source health bar from the rows themselves — one card per source,
-  // tiered by how fresh its newest event is. No server round-trip needed.
-  const all=[...DATA.incidents,...DATA.context], by={};
-  all.forEach(i=>{
-    const s=by[i.source]||(by[i.source]={name:i.source,count:0,freshest:0});
-    s.count++; const t=tsOf(i.date,i.time); if(t>s.freshest)s.freshest=t;
-  });
-  const tier=s=>s.freshest>=nowMs()-LIVE_HOURS*36e5?1
-              :s.freshest>=nowMs()-MAX_AGE_DAYS*864e5?2:3;
+  const all=[...DATA.hr,...DATA.ctx,...DATA.at], by={};
+  all.forEach(i=>{const s=by[i.source]||(by[i.source]={name:i.source,count:0,freshest:0,c:i.country});s.count++;const t=tsOf(i.date,i.time);if(t>s.freshest)s.freshest=t;});
+  const tier=s=>s.freshest>=Date.now()-LIVE_HOURS*36e5?1:s.freshest>=Date.now()-MAX_AGE_DAYS*864e5?2:3;
   const srcs=Object.values(by).sort((a,b)=>tier(a)-tier(b)||b.freshest-a.freshest);
-  $("srcbar").innerHTML=srcs.map(s=>{
-    const t=tier(s);
-    const col=["","var(--ok)","var(--accident)","var(--warn)"][t];
-    const lab=["","LIVE","RECENT","STALE"][t];
-    const fresh=new Date(s.freshest);
-    const p=x=>String(x).padStart(2,"0");
-    const fs=`${p(fresh.getDate())}.${p(fresh.getMonth()+1)}. ${p(fresh.getHours())}:${p(fresh.getMinutes())}`;
-    return `<div class="src"><div class="sn">${esc(s.name)}</div>
-      <div class="st" style="color:${col}">● ${lab} — ${s.count} rows</div>
-      <div class="sm">newest ${esc(fs)}</div></div>`;}).join("");
+  $("srcbar").innerHTML=srcs.map(s=>{const t=tier(s), col=["","var(--ok)","var(--accident)","var(--warn)"][t], lab=["","V ŽIVO","NEDAVNO","STARO"][t];
+    const f=new Date(s.freshest),p=x=>String(x).padStart(2,"0");
+    return `<div class="src"><div class="n">${s.c==="AT"?"🇦🇹":"🇭🇷"} ${esc(s.name)}</div><div class="s" style="color:${col}">● ${lab} · ${s.count}</div><div class="m">zadnje ${p(f.getDate())}.${p(f.getMonth()+1)}. ${p(f.getHours())}:${p(f.getMinutes())}</div></div>`;}).join("");
 }
 
+// ── Sync status ──────────────────────────────────────────────────────────────
 function syncHeader(){
-  const mode=rtStatus==="live"?"realtime ◉":rtStatus==="polling"?"polling":rtStatus==="offline"?"unreachable":"connecting…";
-  $("feedtxt").textContent=`supabase · ${mode} · ${ROWS.size} rows${lastSync?" · "+cestHM(lastSync):""}`;
-  $("feedled").classList.toggle("b", rtStatus==="offline");
+  const mode=rtStatus==="live"?"v živo":rtStatus==="polling"?"osveževanje":rtStatus==="offline"?"ni povezave":"povezujem…";
+  $("feedtxt").textContent=`${mode}${lastSync?" · "+cestHM(lastSync):""}`;
+  $("feedt").textContent=lastChange?` · zadnja sprememba ${cestHM(lastChange)}`:"";
+  $("feedled").classList.toggle("b",rtStatus==="offline"); $("feedled").classList.toggle("p",rtStatus==="polling"||rtStatus==="connecting");
 }
 
-// Rebuild the whole view from ROWS. Called after a full REST load and after every
-// realtime patch, so a single INSERT repaints exactly like a fresh fetch would.
 function rebuild(){
-  const all=[...ROWS.values()].map(mapRow)
-    .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time));
-  // Defensive: an incident (never a weather forecast, which is legitimately
-  // future-dated) timestamped after "now" is bad data, not a live call — a stale
-  // scrape or a bad date parse. Never let one render as "just now". A five-minute
-  // grace absorbs ordinary clock skew between this browser and the database.
-  const cutoff=nowMs()+5*6e4;
-  // The app's own rule is "hide anything older than MAX_AGE_DAYS" — the log's
-  // window toggle only ever shows 12h or 3d, so nothing needs an incident older
-  // than that. Enforce it here, once, rather than in every place that reads
-  // DATA.incidents — the header's incident/source counts used to read the raw
-  // unfiltered total and silently grow past the promised 3-day cap forever as
-  // the archive accumulates.
-  // country="HR" (or missing, for rows from before the country column existed)
-  // drives the Croatian map/log/KPIs; country="AT" is a wholly separate,
-  // map-less feed below — never mix the two into one count or one list.
-  DATA.incidents=all.filter(i=>(i.country||"HR")==="HR" && i.category!=="summary" && i.category!=="weather"
-    && (!i.date || tsOf(i.date,i.time)<=cutoff) && isRecent(i));
-  DATA.context  =all.filter(i=>(i.country||"HR")==="HR" && (i.category==="summary"||i.category==="weather"));
-  // Austria's own retention is enforced server-side (rows past AT_MAX_AGE_DAYS
-  // are actually deleted, not just hidden), so everything returned here is
-  // already in-window — no extra client-side age filter needed.
-  DATA.austria  =all.filter(i=>i.country==="AT");
-  const live=DATA.incidents.filter(isLive).length;
-  const act =DATA.incidents.filter(i=>isActive(i)&&isRecent(i)).length;
-  $("scope").textContent=`${live} live · ${act} active · ${DATA.incidents.length} in last ${MAX_AGE_DAYS}d · ${new Set(DATA.incidents.map(i=>i.source)).size} sources`;
-  srcTiers(); draw(); drawAustria();
-  if(sel) detail([...DATA.incidents,...DATA.context].find(i=>i.id===sel));
-  syncHeader();
+  const all=[...ROWS.values()].map(mapRow);
+  const cutoff=Date.now()+5*6e4;
+  DATA.hr=all.filter(i=>i.country==="HR"&&i.category!=="summary"&&i.category!=="weather"&&(!i.date||tsOf(i.date,i.time)<=cutoff)&&isRecent(i));
+  DATA.ctx=all.filter(i=>i.country==="HR"&&(i.category==="summary"||i.category==="weather"));
+  DATA.at=all.filter(i=>i.country==="AT"&&(!i.date||tsOf(i.date,i.time)<=cutoff));
+  const live=DATA.hr.filter(isLive).length, act=DATA.hr.filter(isActive).length+DATA.at.filter(i=>i.status==="active"&&i.category!=="exercise").length;
+  $("scope").textContent=`${act} aktivnih · HR ${live} v živo · AT ${DATA.at.length} · ${new Set(all.map(i=>i.source)).size} virov`;
+  srcTiers(); AT.render(); HR.render(); syncHeader();
+  // Refresh an open detail in place; never pop a sheet the user has dismissed.
+  [AT,HR].forEach(p=>{ if(p.sel&&(p.isOpen()||!isPhone())){const f=[...DATA.hr,...DATA.at].find(x=>x.id===p.sel); f?p.openSheet(f):p.closeSheet();} });
 }
 
+// ── Data: REST load, cheap head check, realtime, tab-return resync ───────────
+let maxSeen="";
+async function sbGet(q){
+  const r=await fetch(`${SB_URL}/rest/v1/incidents?${q}`,{headers:{apikey:SB_KEY,Authorization:`Bearer ${SB_KEY}`},cache:"no-store"});
+  if(!r.ok) throw new Error("HTTP "+r.status); return r.json();
+}
 async function load(){
   try{
-    // Server-side cap to match the app's own retention rule: never even fetch an
-    // incident older than the app will ever show. Keeps the payload small as the
-    // archive grows over weeks of 15-minute polls instead of re-downloading it
-    // in full every load. A one-day buffer past MAX_AGE_DAYS covers timezone
-    // rounding at the edge of the window.
     const cutoffDate=new Date(Date.now()-(AT_REPORT_DAYS+1)*864e5).toISOString().slice(0,10);
-    const url=`${SB_URL}/rest/v1/incidents?select=*&order=ts.desc.nullslast&limit=2000&occurred=gte.${cutoffDate}`;
-    const r=await fetch(url,{headers:{apikey:SB_KEY,Authorization:`Bearer ${SB_KEY}`},cache:"no-store"});
-    if(!r.ok) throw new Error("HTTP "+r.status);
-    const rows=await r.json();
+    const rows=await sbGet(`select=*&order=ts.desc.nullslast&limit=2000&occurred=gte.${cutoffDate}`);
+    const before=ROWS.size, had=new Set(ROWS.keys());
     ROWS.clear(); rows.forEach(row=>ROWS.set(row.id,row));
-    lastSync=Date.now();
-    if(rtStatus!=="live") rtStatus="polling";   // realtime, once up, owns the status
+    const added=rows.filter(r=>!had.has(r.id)).length;
+    rows.forEach(r=>{ if(r.last_seen>maxSeen) maxSeen=r.last_seen; });
+    lastSync=Date.now(); if(added&&before) {lastChange=Date.now(); toast(`+${added} novih vrstic`);} else if(!before) lastChange=Date.now();
+    if(rtStatus!=="live") rtStatus="polling";
     rebuild();
-  }catch(e){
-    rtStatus="offline"; $("scope").textContent="offline"; syncHeader();
-  }
+  }catch(e){ rtStatus="offline"; $("scope").textContent="ni povezave s Supabase"; syncHeader(); }
 }
-
-// Open the realtime channel. Every INSERT/UPDATE/DELETE on public.incidents that
-// the read policy exposes arrives here and patches ROWS in place. If the client
-// script or the socket is unavailable, we simply stay on the polling fallback.
+// A 1-row probe every 60 s (a few hundred bytes): if the newest last_seen moved, something was upserted → full reload.
+// This is what makes the board move even when the websocket looks alive but silently dropped (iOS background).
+async function headCheck(){
+  try{ const r=await sbGet("select=last_seen&order=last_seen.desc.nullslast&limit=1"); const ls=r[0]?.last_seen||"";
+    if(ls&&ls>maxSeen) await load(); else { lastSync=Date.now(); syncHeader(); } }catch(e){}
+}
 function startRealtime(){
-  if(typeof supabase==="undefined"||!supabase.createClient){ if(rtStatus!=="offline")rtStatus="polling"; syncHeader(); return; }
+  if(typeof supabase==="undefined"||!supabase.createClient){ if(rtStatus!=="offline") rtStatus="polling"; syncHeader(); return; }
   const client=supabase.createClient(SB_URL,SB_KEY,{realtime:{params:{eventsPerSecond:5}}});
-  client.channel("vatrocad-incidents")
-    .on("postgres_changes",{event:"*",schema:"public",table:"incidents"},payload=>{
+  client.channel("vatrocad-incidents").on("postgres_changes",{event:"*",schema:"public",table:"incidents"},payload=>{
       if(payload.eventType==="DELETE"){ if(payload.old?.id) ROWS.delete(payload.old.id); }
-      else if(payload.new?.id){ ROWS.set(payload.new.id,payload.new); }
-      lastSync=Date.now(); rebuild();
-    })
-    .subscribe(status=>{
+      else if(payload.new?.id){ const isNew=!ROWS.has(payload.new.id); ROWS.set(payload.new.id,payload.new); if(payload.new.last_seen>maxSeen) maxSeen=payload.new.last_seen; if(isNew) toast("Nova intervencija"); }
+      lastSync=lastChange=Date.now(); rebuild();
+    }).subscribe(status=>{
       if(status==="SUBSCRIBED"){ rtStatus="live"; syncHeader(); }
-      else if(rtStatus==="live"&&(status==="CHANNEL_ERROR"||status==="TIMED_OUT"||status==="CLOSED")){
-        rtStatus="polling"; syncHeader();   // 30s poll takes over automatically
-      }
+      else if(rtStatus==="live"&&(status==="CHANNEL_ERROR"||status==="TIMED_OUT"||status==="CLOSED")){ rtStatus="polling"; syncHeader(); }
     });
 }
-
-$("refresh").addEventListener("click",async()=>{
-  const b=$("refresh"); b.disabled=true; b.textContent="Syncing…";
-  try{ await load(); } finally{ b.disabled=false; b.textContent="Refresh now"; }
-});
-function tick(){
-  const n=new Date(), p=x=>String(x).padStart(2,"0");
-  const c=new Date(n.getTime()+n.getTimezoneOffset()*6e4+2*36e5);
-  $("clock").textContent=`${p(c.getHours())}:${p(c.getMinutes())}:${p(c.getSeconds())}`;
-}
+$("refresh").addEventListener("click",async()=>{const b=$("refresh"); b.classList.add("spin"); try{ await load(); toast(`Osveženo · ${ROWS.size} vrstic`);} finally{ b.classList.remove("spin"); }});
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") load(); });
+window.addEventListener("online",load);
+function tick(){const n=new Date(),p=x=>String(x).padStart(2,"0");const c=new Date(n.getTime()+n.getTimezoneOffset()*6e4+2*36e5);
+  $("clock").textContent=`${p(c.getHours())}:${p(c.getMinutes())}:${p(c.getSeconds())}`;}
 tick(); setInterval(tick,1000);
+$("foot").innerHTML=`Podatki: Supabase Postgres (bralni ključ, RLS) prek realtime websocketa + 60-sekundna kontrola sprememb + osvežitev ob vrnitvi v aplikacijo.
+  Vrstice polni <code>vatrocad.py</code> vsakih 15 min iz javnih virov: HR gasilske enote, ŽVOC, policija, HVZ, HGSS, HAC; AT dispečerska sistema Wastl (NÖ) in LFV (OÖ) ter poročila enot na Štajerskem in Koroškem.
+  Okno: HR v živo 12 h / dnevnik 3 dni · AT dispečerske vrstice 3 dni, poročila 7 dni. Zemljevid © Esri.`;
 
-$("foot").innerHTML=`Live from a <b>Supabase</b> Postgres backend over a realtime websocket
-  (read-only publishable key, row-level security; falls back to 30s REST polling if the socket drops).
-  Rows are pushed by <code>vatrocad.py</code>, which polls Croatia's public brigade, ŽVOC, police and
-  HVZ pages. Dispatch itself runs on HVZ's closed <b>UVI/VATROnet</b>; these public pages are the only
-  open surface. Window: live = ${LIVE_HOURS}h, log capped at ${MAX_AGE_DAYS} days. Map tiles © Esri.`;
-
-initMap();
+AT.initMap(); HR.initMap();
 load().then(startRealtime);
-// Fast poll only until realtime is confirmed up; a slow safety re-sync always runs
-// so a missed websocket event can never leave the board stale for long.
-setInterval(()=>{ if(rtStatus!=="live") load(); }, 30000);
-setInterval(load, 5*60*1000);
-detail(null);
+setInterval(()=>{ if(rtStatus!=="live") load(); },30000);
+setInterval(headCheck,60000);
+setInterval(load,5*60*1000);
+setInterval(()=>{AT.render();HR.render();},120000);   // ages ("pred 3 min") and the 1-hour red state move on their own
 </script>
 </body>
 </html>
