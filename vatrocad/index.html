@@ -228,7 +228,12 @@ svg.ic{width:1em;height:1em;fill:currentColor;vertical-align:-.15em;flex:none}
 .kv .v{font-size:14px;margin-top:2px;color:var(--tx)}
 .exp{margin-top:10px;padding:10px 12px;background:var(--panel3);border-left:3px solid var(--tx3);border-radius:8px;font-size:13px;line-height:1.55;color:var(--tx2)}
 .exp b{color:var(--tx)}
-.raw{margin-top:10px;font-size:13px;line-height:1.55;color:var(--tx2);max-height:180px;overflow:auto}
+.raw{margin-top:10px;font-size:13px;line-height:1.6;color:var(--tx);max-height:300px;overflow:auto}
+.raw b{color:var(--tx3);font-weight:600}
+.orig{margin-top:8px;font-size:12.5px;color:var(--tx2)}
+.orig summary{cursor:pointer;color:var(--tx3);font-weight:600;padding:4px 0}
+.orig>div{margin-top:4px;line-height:1.55;max-height:220px;overflow:auto}
+.mtnote{margin-top:8px;font-size:11px;color:var(--tx3)}
 .acts{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
 .btn{height:40px;padding:0 14px;border-radius:10px;background:var(--panel3);border:1px solid var(--line2);color:var(--tx);font-weight:600;font-size:13px;
   display:inline-flex;align-items:center;gap:7px;text-decoration:none}
@@ -403,6 +408,11 @@ const AT_KIND={B:"B = Brand — požar",T:"T = Technischer Einsatz — tehnična
 const AT_LEVEL={0:"stopnja 0 — brez nevarnosti, rutinska naloga",1:"stopnja 1 — manjši obseg, ena enota",2:"stopnja 2 — srednji obseg, več enot, ogrožene osebe",
   3:"stopnja 3 — večji obseg, enote iz sosednjih krajev",4:"stopnja 4 — velik dogodek, številne enote"};
 const isReport=i=>i.country==="AT"&&!/^(NOE|OOE)-/.test(i.ref||"");
+// Display title: Slovenian when we have it, else the original. A gloss that
+// only echoes the source (AT dispatch, already-Slovenian) is not "translated".
+const dtitle=i=>i.title_sl||i.title||"";
+const isTranslated=i=>!!(i.title_sl&&i.title_sl!==i.title)||!!(i.raw_sl&&i.raw_sl!==i.raw);
+const srcLang=i=>i.country==="AT"?"nemško":"hrvaško";
 const isHeli=i=>/Hubschrauber|Landeplatz|Notarzt/i.test(i.raw||"");
 const atExplain=i=>{const m=/^(SOF|[BTSU])(\d)\b/.exec(i.raw||"");
   if(m) return `${AT_KIND[m[1]]||m[1]} · ${AT_LEVEL[m[2]]||("stopnja "+m[2])}`;
@@ -438,7 +448,7 @@ let lastSync=0, lastChange=0, rtStatus="connecting";
 const F={win:"live",cat:"all",reg:"all",q:""};
 const AF={state:"all",ex:true,active:false,q:""};
 
-function mapRow(r){return {id:r.id,source:r.source,region:r.region,country:r.country||"HR",ref:r.ref,date:r.occurred,time:r.occurred_time,
+function mapRow(r){return {id:r.id,source:r.source,region:r.region,country:r.country||"HR",ref:r.ref,date:r.occurred,time:r.occurred_time,title_sl:r.title_sl,raw_sl:r.raw_sl,
   category:r.category,status:r.status||"unknown",title:r.title,location:r.location,lat:r.lat,lon:r.lon,units:r.units,crew:r.crew,vehicles:r.vehicles,
   raw:r.raw,link:r.link,first_seen:r.first_seen,last_seen:r.last_seen};}
 
@@ -473,7 +483,7 @@ function makePanel(cfg){
       <div class="ico" style="--c:${colorOf(i)}">${ic(iconOf(i))}</div>
       <div class="tm mono"><b>${esc(i.time||"—")}</b>${dmy(i.date)}<span class="ag ${isLive(i)?"live":""}" style="display:block">${fresh?"🆕 ":""}${ageShort(i)}</span></div>
       <div class="bd">
-        <div class="tt">${rep?`<span class="tag rep">${ic("i-report")} ${esc(CAT_SHORT[i.category]||i.category)}</span>`:""}${esc(i.title)} ${status}</div>
+        <div class="tt">${rep?`<span class="tag rep">${ic("i-report")} ${esc(CAT_SHORT[i.category]||i.category)}</span>`:""}${esc(dtitle(i))} ${status}</div>
         <div class="lo">${ic("i-pin")}${esc(i.location||"—")}${cfg.regionTag(i)}</div>
         ${i.units&&i.units!=="—"?`<div class="un">${esc(i.units)}</div>`:""}
       </div></div>`;
@@ -497,7 +507,7 @@ function makePanel(cfg){
       if(n){const a=n*2.399,r=0.006*Math.sqrt(n);lat+=r*Math.sin(a);lon+=r*Math.cos(a);}
       const m=L.marker([lat,lon],{icon:pinIcon(i,P.sel===i.id),keyboard:false});
       m.bindPopup(`<div class="mpop"><span class="bdg" style="background:${colorOf(i)}2e;color:${colorOf(i)}">${ic(iconOf(i))}${esc(CAT_SL[i.category]||i.category)}</span>
-        <div class="pt">${esc(i.title)}</div><div class="pm">${esc(i.location||"")} · ${esc(i.time||"—")} · ${ageSl(i)}</div></div>`,{closeButton:false,autoPanPaddingBottomRight:[10,isPhone()?300:10]});
+        <div class="pt">${esc(dtitle(i))}</div><div class="pm">${esc(i.location||"")} · ${esc(i.time||"—")} · ${ageSl(i)}</div></div>`,{closeButton:false,autoPanPaddingBottomRight:[10,isPhone()?300:10]});
       m.on("click",()=>P.select(i.id,{fly:false}));
       m.addTo(P.layer); P.markers.set(i.id,m); bounds.push([i.lat,i.lon]);
     }
@@ -560,7 +570,13 @@ const actions=i=>`<div class="acts">${i.lat!=null?`<button class="btn pri" data-
   ${i.link?`<a class="btn" href="${esc(i.link)}" target="_blank" rel="noopener">${ic("i-ext")} Odpri vir</a>`:""}</div>`;
 const head=i=>`<div class="dh"><span class="bdg" style="background:${colorOf(i)}2e;color:${colorOf(i)}">${ic(iconOf(i))}${esc(CAT_SL[i.category]||i.category)}</span>
   ${i.status&&i.status!=="unknown"&&!isReport(i)?`<span class="pill ${i.status}">${STATUS_SL[i.status]||esc(i.status)}</span>`:""}
-  ${isFresh(i)?`<span class="pill new">🆕 novo</span>`:""}<div class="dt">${esc(i.title)}</div></div>`;
+  ${isFresh(i)?`<span class="pill new">🆕 novo</span>`:""}<div class="dt">${esc(dtitle(i))}</div></div>`;
+// Slovenian narrative first, the untouched original kept below it.
+const narrative=i=>{const sl=i.raw_sl&&i.raw_sl!==i.raw?i.raw_sl:null, orig=i.raw||"";
+  if(!orig&&!sl) return "";
+  const body=sl?`<div class="raw"><b>Opis:</b> ${esc(sl)}</div>`:(orig?`<div class="raw">${esc(orig)}</div>`:"");
+  const src=(sl&&orig)?`<details class="orig"><summary>Izvirnik (${srcLang(i)})</summary><div>${esc(orig)}</div></details>`:"";
+  return body+src;};
 const kv=pairs=>`<div class="kv">${pairs.filter(p=>p).map(([l,v])=>`<div><div class="l">${l}</div><div class="v">${v}</div></div>`).join("")}</div>`;
 
 function atDetail(i){
@@ -569,14 +585,14 @@ function atDetail(i){
     ["Stanje",isReport(i)?"ZAKLJUČENO (poročilo)":(STATUS_SL[i.status]||"—")],["Vrsta vira",isReport(i)?"📰 poročilo enote":"📡 dispečerski dnevnik v živo"],
     ["Št. enot",String(i.vehicles??(i.units&&i.units!=="—"?i.units.split(",").length:"—"))],["Referenca",esc(i.ref||"—")],["Vir",esc(i.source)]])+
     `<div class="exp"><b>Koda in stopnja:</b> ${esc(atExplain(i))}<br><b>Vrsta:</b> ${esc(CAT_SL[i.category]||i.category)}${isHeli(i)?" · 🚁 v besedilu je omenjen helikopter / zdravnik NMP":""}
-      ${i.units&&i.units!=="—"?`<br><b>Alarmirane enote:</b> ${esc(i.units)}`:""}</div>
-    <div class="raw"><b>${isReport(i)?"Izvleček poročila (nemško)":"Izvirni nemški zapis"}:</b> ${esc(i.raw||"—")}</div>`+actions(i);
+      ${i.units&&i.units!=="—"?`<br><b>Alarmirane enote:</b> ${esc(i.units)}`:""}</div>`+
+    narrative(i)+(isTranslated(i)?`<div class="mtnote">🌐 samodejni prevod iz nemščine</div>`:"")+actions(i);
 }
 function hrDetail(i){
   return head(i)+kv([["Kraj",esc(i.location||"—")],["Regija",esc(HR_REG[i.region]||i.region||"—")],["Datum",esc(i.date)],["Dojava",`${esc(i.time||"—")} · ${ageSl(i)}`],
     ["Stanje",STATUS_SL[i.status]||"—"],["Posadka / vozila",`${i.crew??"—"}${i.vehicles?" · "+i.vehicles+" voz.":""}`],["Referenca",esc(i.ref||"—")],["Vir",esc(i.source)]])+
     (i.units&&i.units!=="—"?`<div class="exp"><b>Enote:</b> ${esc(i.units)}</div>`:"")+
-    (i.raw?`<div class="raw">${esc(i.raw)}</div>`:"")+actions(i);
+    narrative(i)+(isTranslated(i)?`<div class="mtnote">🌐 samodejni prevod iz hrvaščine</div>`:"")+actions(i);
 }
 
 // ── Panels ───────────────────────────────────────────────────────────────────
@@ -584,7 +600,7 @@ const AT=makePanel({list:"atList",map:"atMap",sheet:"atSheet",split:"atSplit",vi
   regionTag:i=>`<span class="tag">${esc(AT_SHORT[i.region]||i.region)}</span>`,
   items:()=>DATA.at.filter(i=>(AF.state==="all"||i.region===AF.state||(AF.state==="border"&&AT_BORDER.has(i.region)))
       &&(AF.ex||i.category!=="exercise")&&(!AF.active||i.status==="active")
-      &&(!AF.q||fold([i.title,i.location,i.units,i.raw,CAT_SL[i.category],AT_STATE[i.region]].join(" ")).includes(AF.q)))
+      &&(!AF.q||fold([i.title_sl,i.title,i.location,i.units,i.raw_sl,i.raw,CAT_SL[i.category],AT_STATE[i.region]].join(" ")).includes(AF.q)))
     .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time)),
   after:v=>{const all=DATA.at, real=all.filter(i=>i.category!=="exercise");
     const act=real.filter(i=>i.status==="active").length, hot=real.filter(isFresh).length, rep=all.filter(isReport).length, ex=all.length-real.length;
@@ -596,7 +612,7 @@ const AT=makePanel({list:"atList",map:"atMap",sheet:"atSheet",split:"atSplit",vi
 const HR=makePanel({list:"hrList",map:"hrMap",sheet:"hrSheet",split:"hrSplit",view:"hrView",center:[44.8,16.2],zoom:7,maxZoom:10,detail:hrDetail,
   regionTag:i=>HR_REG[i.region]?`<span class="tag">${esc(HR_REG[i.region])}</span>`:"",
   items:()=>DATA.hr.filter(i=>(F.cat==="all"||i.category===F.cat)&&(F.reg==="all"||i.region===F.reg)&&(F.win==="recent"?isRecent(i):isLive(i))
-      &&(!F.q||fold([i.title,i.location,i.units,i.raw,CAT_SL[i.category],HR_REG[i.region]].join(" ")).includes(F.q)))
+      &&(!F.q||fold([i.title_sl,i.title,i.location,i.units,i.raw_sl,i.raw,CAT_SL[i.category],HR_REG[i.region]].join(" ")).includes(F.q)))
     .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time)),
   after:v=>{const inc=DATA.hr, live=inc.filter(isLive), c=k=>live.filter(i=>i.category===k).length, act=inc.filter(isActive).length;
     $("hrChips").innerHTML=[["V živo · 12 h",live.length,"i-clock"],["Aktivno",act,"i-bolt",act>0],["Požari",c("fire"),"i-fire"],["Tehnično",c("tech"),"i-tech"],["NMP",c("ems"),"i-ems"],["Nesreče",c("accident"),"i-accident"],["HGSS",c("rescue"),"i-rescue"]]
@@ -604,7 +620,7 @@ const HR=makePanel({list:"hrList",map:"hrMap",sheet:"hrSheet",split:"hrSplit",vi
     $("hrCount").textContent=`${v.length} / ${inc.length}`; $("segHr").textContent=act;
     const a=inc.filter(isActive).sort((x,y)=>tsOf(y.date,y.time)-tsOf(x.date,x.time));
     $("activewrap").hidden=!a.length;
-    $("acards").innerHTML=a.map(i=>`<button class="acard" data-id="${esc(i.id)}" style="border-left-color:${colorOf(i)}"><div class="t">${ic(iconOf(i))} ${esc(i.title)}</div>
+    $("acards").innerHTML=a.map(i=>`<button class="acard" data-id="${esc(i.id)}" style="border-left-color:${colorOf(i)}"><div class="t">${ic(iconOf(i))} ${esc(dtitle(i))}</div>
       <div class="m"><span class="pill ${i.status}">${STATUS_SL[i.status]||i.status}</span>${esc(i.location||"")} · ${esc(i.time||"—")}</div></button>`).join("");
     // Region chips from the data itself, most active first.
     const cnt={}; inc.forEach(i=>{cnt[i.region]=(cnt[i.region]||0)+1;});

@@ -54,6 +54,135 @@ CEST = timezone(timedelta(hours=2))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
+# ── Slovenian auto-translation ────────────────────────────────────────────
+# Titles and narratives in these feeds are German (Austria) or Croatian; the
+# console is Slovenian, so we translate them once via MyMemory's free, keyless
+# endpoint (de|sl, hr|sl) and cache the result forever in the local SQLite
+# (persisted between CI runs by the same actions/cache as the geocode cache).
+# The original text is always kept alongside. Only rows inside the display
+# window are translated — the HR archive is never shown, so never translated —
+# and a per-day word budget keeps us inside the anonymous free tier; anything
+# not yet translated simply shows its original until a later cycle fills it in.
+MT_ENDPOINT = "https://api.mymemory.translated.net/get"
+MT_DAILY_WORDS = 4000          # anonymous free tier is ~5000 words/day per IP; stay under
+MT_CALLS_PER_CYCLE = 45        # bounds job time, not the free tier (the word budget does that)
+MT_WINDOW_DAYS = {"stmk": 8, "ktn": 8}   # AT border reports live 7d; others fall back to 4
+_mt_stop = False               # set within a cycle once the quota/budget is spent
+
+
+def _mt_words_today(conn) -> int:
+    key = "mt_words_" + datetime.now(timezone.utc).strftime("%Y%m%d")
+    row = conn.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+    return int(row["v"]) if row else 0
+
+
+def _mt_add_words(conn, total: int):
+    key = "mt_words_" + datetime.now(timezone.utc).strftime("%Y%m%d")
+    with conn:
+        conn.execute("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=?",
+                     (key, str(total), str(total)))
+
+
+def mm_translate(conn, text: str, src: str):
+    """Translate `text` from `src` (de|hr) into Slovenian, cache-first. Returns the
+    Slovenian string, or None when nothing usable is available (empty input, cache
+    miss with the budget spent, or an API/quota failure). Only genuine translations
+    are cached — a quota warning or error is never stored, so it retries next run."""
+    global _mt_stop
+    text = tidy(text or "")
+    if len(text) < 3:
+        return text or None
+    import hashlib
+    key = f"{src}|{hashlib.md5(text.encode()).hexdigest()}"
+    row = conn.execute("SELECT v FROM translate_cache WHERE k=?", (key,)).fetchone()
+    if row is not None:
+        return row["v"]
+    if _mt_stop:
+        return None
+    words = len(text.split())
+    if _mt_words_today(conn) + words > MT_DAILY_WORDS:
+        _mt_stop = True
+        return None
+    q = urllib.parse.urlencode({"q": text[:500], "langpair": f"{src}|sl"})
+    req = urllib.request.Request(f"{MT_ENDPOINT}?{q}", headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            d = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:                                             # noqa: BLE001
+        _mt_stop = True                                           # network/endpoint down — stop for this cycle
+        return None
+    out = tidy((d.get("responseData") or {}).get("translatedText") or "")
+    status = d.get("responseStatus")
+    bad = (not out or d.get("quotaFinished")
+           or (isinstance(status, int) and status != 200)
+           or "MYMEMORY WARNING" in out.upper() or "USED ALL AVAILABLE" in out.upper()
+           or "INVALID LANGUAGE PAIR" in out.upper())
+    if bad:
+        _mt_stop = True                                          # quota hit — don't hammer it further this cycle
+        return None
+    _mt_add_words(conn, _mt_words_today(conn) + words)
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO translate_cache(k,v) VALUES(?,?)", (key, out))
+    time.sleep(0.4)                                              # be polite to a free service
+    return out
+
+
+def translate_rows(conn, rows):
+    """Fill each row's Slovenian title_sl / raw_sl. Austrian dispatch rows (NÖ/OÖ)
+    are already glossed to Slovenian, so they cost nothing; report and Croatian
+    rows go through MyMemory, newest first, only inside the display window and
+    only while the day's word budget lasts. Reads the cache for rows done on an
+    earlier cycle, writes new translations back to both the DB and the row dict
+    (so the very same push carries them to Supabase)."""
+    global _mt_stop
+    _mt_stop = False
+    ids = [r["id"] for r in rows]
+    known = {}
+    for i in range(0, len(ids), 400):
+        chunk = ids[i:i + 400]
+        qmarks = ",".join("?" * len(chunk))
+        for row in conn.execute(
+                f"SELECT id,title_sl,raw_sl FROM incidents WHERE id IN ({qmarks})", chunk):
+            known[row["id"]] = (row["title_sl"], row["raw_sl"])
+    today = datetime.now(CEST).date()
+    calls = 0
+
+    def recent(r):
+        try:
+            d = datetime.strptime(r.get("date", ""), "%Y-%m-%d").date()
+        except ValueError:
+            return False
+        return (today - d).days <= MT_WINDOW_DAYS.get(r.get("region"), 4)
+
+    for r in sorted(rows, key=lambda r: (r.get("date", ""), r.get("time", "")), reverse=True):
+        country, region = r.get("country", "HR"), r.get("region")
+        src = "de" if country == "AT" else "hr"
+        t_sl, raw_sl = known.get(r["id"], (None, None))
+        # Austrian dispatch: the title is glossed Slovenian already; gloss the
+        # short type string for the narrative too. No network needed.
+        if country == "AT" and region in ("noe", "ooe"):
+            t_sl = r.get("title"); raw_sl = at_translate(r.get("raw") or "")
+        else:
+            need = (t_sl is None or raw_sl is None) and recent(r) and not _mt_stop
+            if need and calls < MT_CALLS_PER_CYCLE:
+                if t_sl is None:
+                    t_sl = mm_translate(conn, r.get("title") or "", src); calls += 1
+                if raw_sl is None and not _mt_stop and calls < MT_CALLS_PER_CYCLE:
+                    raw_sl = mm_translate(conn, r.get("raw") or "", src); calls += 1
+            # Fallbacks so the row always carries *something* Slovenian-leaning:
+            # the German glossary for AT, the (readable) Croatian original for HR.
+            if t_sl is None:
+                t_sl = at_translate(r.get("title") or "") if src == "de" else r.get("title")
+            if raw_sl is None:
+                raw_sl = at_translate(r.get("raw") or "") if src == "de" else None
+        r["title_sl"] = t_sl
+        r["raw_sl"] = raw_sl
+        if (t_sl, raw_sl) != known.get(r["id"]):
+            with conn:
+                conn.execute("UPDATE incidents SET title_sl=?, raw_sl=? WHERE id=?",
+                             (t_sl, raw_sl, r["id"]))
+    return f"MT: {calls} klicev, {_mt_words_today(conn)} besed danes" + (" (kvota)" if _mt_stop else "")
+
 
 def status_of(text: str) -> str:
     """Derive a dispatch status from the incident text — the CAD distinction
@@ -112,7 +241,8 @@ def push_supabase(rows):
             "title": r.get("title"), "location": r.get("location"),
             "lat": r.get("lat"), "lon": r.get("lon"), "units": r.get("units"),
             "crew": r.get("crew"), "vehicles": r.get("vehicles"),
-            "raw": r.get("raw"), "link": r.get("link"), "last_seen": now,
+            "raw": r.get("raw"), "link": r.get("link"),
+            "title_sl": r.get("title_sl"), "raw_sl": r.get("raw_sl"), "last_seen": now,
         })
     body = json.dumps(payload, ensure_ascii=False).encode()
     req = urllib.request.Request(
@@ -604,7 +734,7 @@ def src_vratisinec():
             "category": categorise(clean + " " + body), "title": clean,
             "location": "Vratišinec", "lat": lat, "lon": lon,
             "units": "DVD Vratišinec", "crew": None, "vehicles": None,
-            "raw": body[:600], "link": p.get("link", ""),
+            "raw": body[:1600], "link": p.get("link", ""),
         })
     return out, status
 
@@ -690,7 +820,7 @@ def src_police():
                 "title": title[:110],
                 "location": place_label(title + " " + body) or seat.title(),
                 "lat": lat, "lon": lon, "units": ", ".join(units) or label,
-                "crew": None, "vehicles": None, "raw": body[:600], "link": base + href,
+                "crew": None, "vehicles": None, "raw": body[:1600], "link": base + href,
             })
     return out, worst
 
@@ -846,7 +976,7 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
                             or place_label(blob) or fallback_key.title(),
                 "lat": lat, "lon": lon,
                 "units": ", ".join(sorted({tidy(u) for u in UNIT_RE.findall(blob)})) or "—",
-                "crew": None, "vehicles": None, "raw": body[:600],
+                "crew": None, "vehicles": None, "raw": body[:1600],
                 "link": tidy(it.findtext("link") or ""),
             })
         return out, status
@@ -896,7 +1026,7 @@ def src_dvd_horvati():
             "location": place_label(title + " " + body) or "Horvati, Zagreb",
             "lat": lat, "lon": lon, "units": "DVD Horvati",
             "crew": None, "vehicles": None,
-            "raw": body[:600], "link": p.get("link", ""),
+            "raw": body[:1600], "link": p.get("link", ""),
         })
     return out, status
 
@@ -950,7 +1080,7 @@ def src_vz_medjimurje():
             "title": title[:110], "location": place_label(title + " " + body) or "Međimurje",
             "lat": lat, "lon": lon, "units": ", ".join(units) or "VZ Međimurske županije",
             "crew": int(tally.group(1)) if tally else None, "vehicles": None,
-            "raw": body[:600], "link": tidy(it.findtext("link") or ""),
+            "raw": body[:1600], "link": tidy(it.findtext("link") or ""),
         })
     return out, status
 
@@ -1019,7 +1149,7 @@ def src_sibenik_in():
             "title": title[:110], "location": place_label(blob) or "Šibenik-Knin",
             "lat": lat, "lon": lon,
             "units": ", ".join(sorted({tidy(u) for u in UNIT_RE.findall(blob)})) or "—",
-            "crew": None, "vehicles": None, "raw": body[:600], "link": url,
+            "crew": None, "vehicles": None, "raw": body[:1600], "link": url,
         })
     return out, status
 
@@ -1068,7 +1198,7 @@ def src_jvp_sibenik():
             "location": place_label(body) or "Šibenik", "lat": lat, "lon": lon,
             "units": ", ".join(tidy(u) for u in units) or "JVP Šibenik",
             "crew": num(crew), "vehicles": num(veh),
-            "raw": body[:600], "link": "https://jvp-sibenik.hr/",
+            "raw": body[:1600], "link": "https://jvp-sibenik.hr/",
         })
     return out, status
 
@@ -1104,7 +1234,7 @@ def src_zvoc_sibenik():
                 "location": place_label(item) or "Šibenik-Knin", "lat": lat, "lon": lon,
                 "units": ", ".join(units), "crew": int(crew.group(1)) if crew else None,
                 "vehicles": int(veh.group(1)) if veh else None,
-                "raw": item[:600],
+                "raw": item[:1600],
                 "link": "https://www.vatrogastvo-sibenik-knin.hr/stranice/intervencije/",
             })
     return out, status
@@ -1271,7 +1401,7 @@ def src_hgss():
             "category": "rescue", "title": title[:110], "location": loc,
             "lat": lat, "lon": lon,
             "units": f"HGSS {('Stanica ' + station.title()) if station else ''}".strip(),
-            "crew": None, "vehicles": None, "raw": body[:600],
+            "crew": None, "vehicles": None, "raw": body[:1600],
             "link": tidy(it.findtext("link") or ""),
         })
     return out, status
@@ -1321,7 +1451,7 @@ def src_hac():
                 "category": "tech", "title": f"{stretch}: {desc}"[:110],
                 "location": place_label(desc) or stretch, "lat": lat, "lon": lon,
                 "units": "HAC", "crew": None, "vehicles": None,
-                "raw": desc[:600],
+                "raw": desc[:1600],
                 "link": "https://www.hac.hr/hr/servisne-informacije/stanje-na-autocestama",
             })
     return out, status
@@ -1829,7 +1959,7 @@ def make_at_feed(label, region, state, url, prefix, fallback):
                 "location": (town or label.split(" ·")[0].replace("BFKDO ", "").replace("BFK ", "").replace("FF ", "")) + f" ({state})",
                 "lat": lat, "lon": lon,
                 "units": ", ".join(units) or "—", "crew": None, "vehicles": len(units) or None,
-                "raw": body[:500], "link": tidy(it.findtext("link") or ""),
+                "raw": body[:1600], "link": tidy(it.findtext("link") or ""),
             })
         return out, status
 
@@ -1887,7 +2017,7 @@ def src_at_stmk_lfv():
             "ref": f"STMK-LFV-{mo}{dd}", "date": date, "time": time_ or "",
             "category": cat, "title": title[:120], "status": "closed",
             "location": location, "lat": lat, "lon": lon,
-            "units": "—", "crew": None, "vehicles": None, "raw": (body or "")[:500], "link": link,
+            "units": "—", "crew": None, "vehicles": None, "raw": (body or "")[:1600], "link": link,
         })
     return out, status
 
@@ -1967,12 +2097,17 @@ CREATE TABLE IF NOT EXISTS incidents(
   id TEXT PRIMARY KEY, source TEXT, region TEXT, ref TEXT, date TEXT, time TEXT,
   category TEXT, title TEXT, location TEXT, lat REAL, lon REAL, units TEXT,
   crew INTEGER, vehicles INTEGER, raw TEXT, link TEXT,
+  title_sl TEXT, raw_sl TEXT,
   first_seen TEXT, last_seen TEXT);
 CREATE INDEX IF NOT EXISTS ix_inc_date ON incidents(date DESC, time DESC);
 CREATE TABLE IF NOT EXISTS sources(
   name TEXT PRIMARY KEY, method TEXT, status TEXT, count INTEGER, checked TEXT);
 CREATE TABLE IF NOT EXISTS geocode_cache(
   q TEXT PRIMARY KEY, lat REAL, lon REAL);
+CREATE TABLE IF NOT EXISTS translate_cache(
+  k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS meta(
+  k TEXT PRIMARY KEY, v TEXT);
 """
 
 
@@ -1980,6 +2115,12 @@ def db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # A geocode-cache DB restored from an older run predates the SL columns.
+    for col in ("title_sl TEXT", "raw_sl TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE incidents ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
     return conn
 
 
@@ -1994,10 +2135,10 @@ def store(conn, rows):
                 continue
             conn.execute(
                 """INSERT INTO incidents(id,source,region,ref,date,time,category,title,
-                   location,lat,lon,units,crew,vehicles,raw,link,first_seen,last_seen)
+                   location,lat,lon,units,crew,vehicles,raw,link,title_sl,raw_sl,first_seen,last_seen)
                    VALUES(:id,:source,:region,:ref,:date,:time,:category,:title,:location,
-                   :lat,:lon,:units,:crew,:vehicles,:raw,:link,:fs,:fs)""",
-                {**r, "fs": now})
+                   :lat,:lon,:units,:crew,:vehicles,:raw,:link,:title_sl,:raw_sl,:fs,:fs)""",
+                {"title_sl": None, "raw_sl": None, **r, "fs": now})
             new += 1
     return new
 
@@ -2048,6 +2189,15 @@ def poll_once(conn, verbose=True):
     except Exception as e:                                        # noqa: BLE001
         if verbose:
             print(f"  street refinement skipped: {type(e).__name__}: {e}")
+    # Translate titles/narratives into Slovenian (cache-first, budgeted), so the
+    # push below carries title_sl/raw_sl alongside the originals.
+    try:
+        mt = translate_rows(conn, all_rows)
+        if verbose:
+            print(f"  {'→ ' + mt:22s}")
+    except Exception as e:                                        # noqa: BLE001
+        if verbose:
+            print(f"  translation skipped: {type(e).__name__}: {e}")
     # Mirror this cycle's full parse into Supabase (idempotent upsert) so a
     # published, machine-independent dashboard can read it.
     sb = push_supabase(all_rows)
