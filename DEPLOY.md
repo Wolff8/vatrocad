@@ -79,6 +79,14 @@ Repo → **Settings → Pages → Build and deployment → Source: GitHub Action
 
 ## Notes
 
+- **Scheduling.** GitHub's cron is best-effort and, on this repo, dropped most
+  slots (a */15 schedule fired once in hours; even hourly slots were skipped).
+  The poll job therefore stays up for 55 minutes polling every 15 minutes, and
+  as its last step **dispatches its own successor** (`gh workflow run`, allowed
+  for `workflow_dispatch` even with `GITHUB_TOKEN`); with
+  `cancel-in-progress: false` the successor queues and starts the moment the
+  current run exits. The two crons only restart the chain if a runner dies.
+  To stop everything, disable the workflow in the Actions tab.
 - **Cadence.** The poller runs every 15 min. Do not go below ~5 min — these are
   small volunteer-brigade servers, and `vatrocad.py` already uses conditional GET
   so unchanged pages cost them almost nothing.

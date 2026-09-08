@@ -31,12 +31,22 @@ name: VatroCAD poll
 
 on:
   schedule:
-    - cron: "3 * * * *"         # hourly (UTC); the job then polls itself every 15 min
+    # Fallbacks only. Even hourly slots get dropped (22:03 UTC on 2026-09-08
+    # never fired and the board went stale for 90 minutes), so the job now
+    # re-dispatches ITSELF as its last step — see "Hand over" below — and these
+    # two crons merely restart the chain if a runner ever dies mid-flight.
+    - cron: "3 * * * *"
+    - cron: "33 * * * *"
   workflow_dispatch: {}         # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: read
+  actions: write                # needed for the self-dispatch hand-over
 
 concurrency:
   group: vatrocad-poll
-  cancel-in-progress: true      # a fresh hourly run replaces the one winding down
+  cancel-in-progress: false     # a hand-over/cron run QUEUES behind the live one and
+                                # starts the moment it exits — an unbroken chain
 
 jobs:
   poll:
@@ -70,3 +80,17 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python3 vatrocad.py --serve-minutes 55 --interval 900
+
+      # Hand over: queue the next run before this one exits. GitHub does not
+      # start workflows from events raised with GITHUB_TOKEN — with two
+      # exceptions, workflow_dispatch and repository_dispatch, which is what
+      # makes this legal. With cancel-in-progress:false the queued run waits
+      # for this one to finish and starts immediately after, so the poller is
+      # never down for more than the runner start-up (~20 s). Runs `always()`
+      # so a crashed poll still hands over. To stop the chain, disable the
+      # workflow in the Actions tab.
+      - name: Hand over to the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run vatrocad-poll.yml --ref "${{ github.ref_name }}" --repo "${{ github.repository }}"
