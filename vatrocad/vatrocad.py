@@ -1795,6 +1795,13 @@ AT_SL_GLOSSARY = [
     ("Personenrettung Verkehrsunfall PKW", "reševanje oseb – prometna nesreča z osebnim vozilom"),
     ("Personenrettung hoch", "reševanje osebe z višine"),
     ("Personenrettung", "reševanje oseb"),
+    ("Personensuche", "iskanje pogrešane osebe"),
+    ("Verkehrsunfall mit eingeklemmter Person", "prometna nesreča z ukleščeno osebo"),
+    ("Kaminbrand", "požar dimnika"), ("Flurbrand", "požar travnika/polja"),
+    ("Wohnungsbrand", "požar stanovanja"), ("Zimmerbrand", "požar sobe"),
+    ("Küchenbrand", "požar v kuhinji"), ("Waldbrand", "gozdni požar"),
+    ("Müllbrand", "požar odpadkov"), ("Containerbrand", "požar zabojnika"),
+    ("Evakuierung - Sofort", "evakuacija – takoj"), ("Evakuierung", "evakuacija"),
     ("Rettung Kleintier", "reševanje male živali"),
     ("Sonstiger Einsatz", "druga intervencija"),
     ("Tragehilfe", "pomoč pri prenosu pacienta (asistenca NMP)"),
@@ -1832,7 +1839,11 @@ def at_translate(de_text: str) -> str:
     always keeps the untouched German original."""
     out = de_text
     for de, sl in AT_SL_GLOSSARY:
-        out = re.sub(re.escape(de), sl, out)
+        # Long phrases may match inside compounds ("Gasaustritt" is listed as
+        # such); the short generic words must not — "Person" inside
+        # "Personensuche" once produced "osebaensuche". Word-bound the short ones.
+        pat = re.escape(de) if len(de) > 7 else r"\b" + re.escape(de) + r"\b"
+        out = re.sub(pat, sl, out)
     return out
 
 
