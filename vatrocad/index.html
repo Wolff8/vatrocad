@@ -331,6 +331,10 @@ footer{font-size:12px;color:var(--tx3);line-height:1.6;padding:0 6px}
       <button class="f" data-at="ktn" aria-pressed="false">Koroška</button>
       <button class="f" data-at="ooe" aria-pressed="false">Zgornja Avstrija</button>
       <button class="f" data-at="noe" aria-pressed="false">Spodnja Avstrija</button>
+      <button class="f sepl" data-atkind="all" aria-pressed="true">Vsi viri</button>
+      <button class="f" data-atkind="dispatch" aria-pressed="false">📡 Dispečer</button>
+      <button class="f" data-atkind="report" aria-pressed="false"><svg class="ic"><use href="#i-report"/></svg>Poročila</button>
+      <button class="f" data-atkind="police" aria-pressed="false">👮 Policija</button>
       <button class="f sepl" data-attog="active" aria-pressed="false"><svg class="ic"><use href="#i-bolt"/></svg>Samo aktivne</button>
       <button class="f" data-attog="ex" aria-pressed="true"><svg class="ic"><use href="#i-exercise"/></svg>Vaje</button>
     </div>
@@ -455,7 +459,8 @@ const ROWS=new Map();
 let DATA={hr:[],ctx:[],at:[]};
 let lastSync=0, lastChange=0, rtStatus="connecting";
 const F={win:"live",cat:"all",reg:"all",q:""};
-const AF={state:"all",ex:true,active:false,q:""};
+const AF={state:"all",kind:"all",ex:true,active:false,q:""};
+const kindOf=i=>isPolice(i)?"police":isReport(i)?"report":"dispatch";
 
 function mapRow(r){return {id:r.id,source:r.source,region:r.region,country:r.country||"HR",ref:r.ref,date:r.occurred,time:r.occurred_time,title_sl:r.title_sl,raw_sl:r.raw_sl,
   category:r.category,status:r.status||"unknown",title:r.title,location:r.location,lat:r.lat,lon:r.lon,units:r.units,crew:r.crew,vehicles:r.vehicles,
@@ -608,13 +613,14 @@ function hrDetail(i){
 const AT=makePanel({list:"atList",map:"atMap",sheet:"atSheet",split:"atSplit",view:"atView",center:[47.3,14.8],zoom:7,maxZoom:9,detail:atDetail,
   regionTag:i=>`<span class="tag">${esc(AT_SHORT[i.region]||i.region)}</span>`,
   items:()=>DATA.at.filter(i=>(AF.state==="all"||i.region===AF.state||(AF.state==="border"&&AT_BORDER.has(i.region)))
+      &&(AF.kind==="all"||kindOf(i)===AF.kind)
       &&(AF.ex||i.category!=="exercise")&&(!AF.active||i.status==="active")
       &&(!AF.q||fold([i.title_sl,i.title,i.location,i.units,i.raw_sl,i.raw,CAT_SL[i.category],AT_STATE[i.region]].join(" ")).includes(AF.q)))
     .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time)),
   after:v=>{const all=DATA.at, real=all.filter(i=>i.category!=="exercise");
     const act=real.filter(i=>i.status==="active").length, hot=real.filter(isFresh).length, rep=all.filter(isReport).length, ex=all.length-real.length;
     $("atChips").innerHTML=[["Aktivno",act,"i-bolt",act>0],["Zadnja ura",hot,"i-clock",hot>0],["Požari",real.filter(i=>i.category==="fire").length,"i-fire"],
-      ["Nesreče",real.filter(i=>i.category==="accident").length,"i-accident"],["NMP",real.filter(i=>i.category==="ems"||isHeli(i)).length,"i-ems"],["Ob meji SLO",all.filter(i=>AT_BORDER.has(i.region)).length,"i-pin"],["Vaje",ex,"i-exercise"],["Poročila",rep,"i-report"]]
+      ["Nesreče",real.filter(i=>i.category==="accident").length,"i-accident"],["NMP",real.filter(i=>i.category==="ems"||isHeli(i)).length,"i-ems"],["Ob meji SLO",all.filter(i=>AT_BORDER.has(i.region)).length,"i-pin"],["Vaje",ex,"i-exercise"],["Poročila",all.filter(i=>isReport(i)&&!isPolice(i)).length,"i-report"],["Policija",all.filter(isPolice).length,"i-other"]]
       .map(([l,v,ic_,hot_])=>`<div class="chip ${hot_?"hot":""}"><div class="l">${l}</div><div class="v mono">${ic(ic_)}${v}</div></div>`).join("");
     $("atCount").textContent=`${v.length} / ${all.length}`; $("segAt").textContent=act;}
 });
@@ -647,6 +653,7 @@ $("hrLegend").innerHTML=[["fire","Požar"],["tech","Tehnično"],["ems","Asistenc
 // ── Filter handlers ──────────────────────────────────────────────────────────
 $("atFilters").addEventListener("click",e=>{const b=e.target.closest(".f"); if(!b) return;
   if(b.dataset.at){AF.state=b.dataset.at;AT.refit=true;document.querySelectorAll('#atFilters .f[data-at]').forEach(o=>o.setAttribute("aria-pressed",String(o===b)));}
+  else if(b.dataset.atkind){AF.kind=b.dataset.atkind;AT.refit=true;document.querySelectorAll('#atFilters .f[data-atkind]').forEach(o=>o.setAttribute("aria-pressed",String(o===b)));}
   else if(b.dataset.attog==="active"){AF.active=!AF.active;b.setAttribute("aria-pressed",String(AF.active));}
   else if(b.dataset.attog==="ex"){AF.ex=!AF.ex;b.setAttribute("aria-pressed",String(AF.ex));}
   AT.sel=null; AT.closeSheet(); AT.shown=LIST_CAP; AT.render();});
