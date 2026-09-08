@@ -793,26 +793,33 @@ def fetch(url: str, timeout: int = 30):
         req.add_header("If-None-Match", val["etag"])
     if val.get("modified"):
         req.add_header("If-Modified-Since", val["modified"])
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            _CACHE_VALIDATORS[url] = {
-                "etag": resp.headers.get("ETag"),
-                "modified": resp.headers.get("Last-Modified"),
-            }
-            charset = resp.headers.get_content_charset()
-            for enc in filter(None, (charset, "utf-8", "cp1250", "iso-8859-2")):
-                try:
-                    return raw.decode(enc), "ok"
-                except (UnicodeDecodeError, LookupError):
-                    continue
-            return raw.decode("utf-8", "replace"), "ok"
-    except urllib.error.HTTPError as e:
-        if e.code == 304:
-            return None, "unchanged"
-        return None, f"error: HTTP {e.code}"
-    except Exception as e:                                    # noqa: BLE001
-        return None, f"error: {type(e).__name__}"
+    # One retry on a *network* failure (reset tunnel, DNS blip, timeout): these
+    # are transient and were costing a source a whole 15-minute cycle. HTTP
+    # errors are answered by the server and are not retried.
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                _CACHE_VALIDATORS[url] = {
+                    "etag": resp.headers.get("ETag"),
+                    "modified": resp.headers.get("Last-Modified"),
+                }
+                charset = resp.headers.get_content_charset()
+                for enc in filter(None, (charset, "utf-8", "cp1250", "iso-8859-2")):
+                    try:
+                        return raw.decode(enc), "ok"
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+                return raw.decode("utf-8", "replace"), "ok"
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                return None, "unchanged"
+            return None, f"error: HTTP {e.code}"
+        except Exception as e:                                # noqa: BLE001
+            if attempt == 1:
+                time.sleep(2)
+                continue
+            return None, f"error: {type(e).__name__}"
 
 
 html_unescape = htmllib.unescape
@@ -1079,12 +1086,36 @@ NEWSROOMS = [
     # JVP Osijek: the category feed is disabled (404) but the query form works.
     ("JVP Osijek · intervencije", "obz", "https://vatrogasci-osijek.hr/?cat=3&feed=rss2",
      "osijek", "jvo", False),
+    # National newsrooms (region=None → region from the place named; no place,
+    # no row). The only afternoon coverage of Zagreb: the capital has no open
+    # brigade log (JVP Zagreb's is credentialed) and its portals block bots.
+    ("24sata · vijesti",   None, "https://www.24sata.hr/feeds/news.xml",     None, "24s", False),
+    ("Index · vijesti",    None, "https://www.index.hr/rss/vijesti",         None, "idx", False),
+    ("Jutarnji · vijesti", None, "https://www.jutarnji.hr/feed",             None, "jut", False),
+    ("Večernji · vijesti", None, "https://www.vecernji.hr/feeds/latest",     None, "vec", False),
+    ("tportal · vijesti",  None, "https://www.tportal.hr/rss-najnovije.xml", None, "tpo", False),
 ]
+
+
+def region_for(lat: float, lon: float) -> str:
+    """County code for a point: the nearest police-administration seat. Used for
+    national newsrooms, whose items can be anywhere in the country."""
+    best, bd = "nat", 9e9
+    for _slug, region, _label, seat in POLICE_PUS:
+        slat, slon = PLACES[seat]
+        d = (slat - lat) ** 2 + ((slon - lon) * 0.7) ** 2
+        if d < bd:
+            best, bd = region, d
+    return best
 
 
 def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
     """Build a fetcher for one newsroom crna-kronika feed. Closes over the config
-    so every regional newsroom shares one tested parser."""
+    so every regional newsroom shares one tested parser.
+
+    region=None marks a NATIONAL feed (24sata, Index…): the item's region is
+    then derived from the place it names, and an item that names no known
+    place is dropped — a nationwide story with no location is not a call."""
 
     def fetch_source():
         out = []
@@ -1127,14 +1158,16 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
                             title) if caps_lead else None
             lat, lon = geocode((lead.group(1) + " " if lead else "") + blob)
             if lat is None:
+                if region is None:
+                    continue                                   # national feed, no place named
                 lat, lon = PLACES[fallback_key]
             out.append({
                 "id": f"{prefix}:{tidy(it.findtext('guid') or it.findtext('link') or title)[-40:]}",
-                "source": label, "region": region,
+                "source": label, "region": region or region_for(lat, lon),
                 "ref": f"{prefix.upper()}-{dt:%m%d-%H%M}", "date": date, "time": t,
                 "category": cat, "title": title[:110],
                 "location": (lead.group(1).title() if lead and _match(lead.group(1)) else None)
-                            or place_label(blob) or fallback_key.title(),
+                            or place_label(blob) or (fallback_key.title() if fallback_key else "Hrvatska"),
                 "lat": lat, "lon": lon,
                 "units": ", ".join(sorted({tidy(u) for u in UNIT_RE.findall(blob)})) or "—",
                 "crew": None, "vehicles": None, "raw": body[:1600],
@@ -2142,6 +2175,10 @@ def make_at_feed(label, region, state, url, prefix, fallback):
             body = re.sub(r"Der Beitrag .*? erschien zuerst auf .*?\.", "", body)
             published = _parse_pubdate(it.findtext("pubDate") or "")
             if published is None:
+                continue
+            # A headline that is itself a competition/anniversary/course is final —
+            # its body ("… Brand …") must not smuggle it back in as a fire.
+            if AT_REPORT_SKIP.search(title) and not re.search(r"Übung", title):
                 continue
             cat = _at_report_category(title) or _at_report_category(body[:300])
             if cat is None:

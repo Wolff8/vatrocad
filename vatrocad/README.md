@@ -201,6 +201,25 @@ Everything else in the table publishes on a slower clock: county bulletins twice
 daily, police the following morning, the national digest once a night. That is the
 sources' rhythm and no amount of polling changes it.
 
+### Every brigade in the country, checked
+
+Rather than guessing which brigades publish, the domain space was scanned:
+dvd-/jvp-/vatrogasci- name patterns for all 834 cities and municipalities plus
+Zagreb's districts and Međimurje's villages (≈9,400 hosts). 133 brigade sites
+exist. Six keep a per-call log alive in 2026 — DVD Vratišinec, JVP Šibenik, and
+the four added from the scan (**DVD Supetar**, **JVP Osijek**, **DVD Garčin**,
+**DVD Valpovo**). Nineteen more once had one and stopped (JVP Drniš 2018, Vodice
+2021, Pula 2025, Čakovec and Samobor early 2026…); the rest publish statistics
+or nothing. Zagreb specifically: JVP Zagreb's log is the credentialed FileMaker
+database (not attempted), VZ Grada Zagreba's interventions category stopped in
+2021, no city DVD posts calls. Međimurje: the county association moved to
+`vatrogasci-medjimurja.eu` and last posted an intervention in June 2026.
+
+**National newsrooms** (Index, Jutarnji, 24sata, Večernji, tportal) are read
+with `region=None`: each item is placed by the settlement it names (nearest
+police-administration seat becomes its county), and an item naming no known
+place is dropped. This is the only afternoon coverage of Zagreb.
+
 ### Searched for more 12-hour sources, found none
 
 Beyond the table, these were probed and rejected on freshness or content:
