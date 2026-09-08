@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VatroCAD — dispatch console</title>
+<!-- Designed in IBM Plex; loaded async so an offline machine paints on the
+     fallback stacks rather than blocking on a font that never arrives. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" media="print" onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;650&display=swap">
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#080b0e;--panel:#10151a;--panel2:#151b22;--panel3:#1a222a;
+  --line:#212b34;--line2:#2c3945;--tx:#dce5ed;--tx2:#8fa1b2;--tx3:#5d7285;
+  --fire:#ff6a35;--tech:#4d9de0;--ems:#b478ec;--accident:#ffd23f;--rescue:#2ec4b6;--other:#7f8d9b;--weather:#ffc233;
+  --ok:#32c46e;--warn:#ffc233;--bad:#ff4a4a;--active:#ff4a4a;--contained:#ffc233;--closed:#5d7285;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--tx)}
+body{font:13px/1.5 "IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,sans-serif}
+.mono,code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-variant-numeric:tabular-nums}
+.shell{max-width:1320px;margin:0 auto;padding:12px 12px 34px;display:flex;flex-direction:column;gap:10px}
+.topbar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;background:var(--panel);
+  border:1px solid var(--line);border-radius:3px;padding:9px 13px}
+.brand{font-size:21px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;line-height:1}
+.brand span{color:var(--fire)}
+.brandsub{font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--tx3);margin-top:2px;min-height:13px}
+.sp{flex:1}
+.led{display:inline-flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--tx2)}
+#feedtxt{display:inline-block;min-width:216px}
+.led i{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 7px var(--ok)}
+.led.b i{background:var(--bad);box-shadow:0 0 7px var(--bad)}
+#clock{font-size:21px;font-weight:600}
+.cl{font-size:9px;letter-spacing:.14em;color:var(--tx3);text-align:right}
+button.rf{background:var(--panel3);color:var(--tx2);border:1px solid var(--line2);border-radius:2px;
+  font:600 10px/1 "IBM Plex Mono",monospace;letter-spacing:.1em;text-transform:uppercase;
+  padding:7px 11px;cursor:pointer}
+button.rf:hover{color:var(--tx);border-color:var(--tx3)}
+button.rf:disabled{opacity:.5;cursor:wait}
+/* Each region reserves the height it fills, so the page holds still on first paint. */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:3px;overflow:hidden;min-height:58px}
+#rows{min-height:430px}
+#srcbar{min-height:78px}
+.kpi{background:var(--panel);padding:8px 12px}
+.kpi .l{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--tx3)}
+.kpi .v{font-size:24px;font-weight:650;line-height:1.15;margin-top:1px}
+/* Active-ops strip: the dispatch "what is burning right now" banner. */
+.active-strip{background:var(--panel);border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.active-strip>h3{margin:0;padding:7px 12px;font:700 9.5px/1.5 "IBM Plex Mono",monospace;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--active);background:var(--panel2);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:8px}
+.active-strip>h3 i{width:8px;height:8px;border-radius:50%;background:var(--active);
+  box-shadow:0 0 8px var(--active);animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+.acards{display:flex;gap:8px;overflow-x:auto;padding:9px}
+.acard{flex:0 0 auto;min-width:210px;max-width:260px;background:var(--panel2);border:1px solid var(--line2);
+  border-left:3px solid var(--active);border-radius:3px;padding:8px 10px;cursor:pointer}
+.acard:hover{border-color:var(--tx3)}
+.acard .at{font-size:12px;font-weight:600;line-height:1.3;margin-bottom:3px}
+.acard .am{font-size:10px;color:var(--tx2);font-family:"IBM Plex Mono",monospace;line-height:1.5}
+.acard .au{font-size:9.5px;color:var(--tx3);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill{display:inline-block;font:700 8.5px/1 "IBM Plex Mono",monospace;letter-spacing:.09em;text-transform:uppercase;
+  padding:3px 6px;border-radius:2px;vertical-align:middle}
+.pill.active{background:color-mix(in srgb,var(--active) 22%,transparent);color:var(--active)}
+.pill.contained{background:color-mix(in srgb,var(--contained) 20%,transparent);color:var(--contained)}
+.pill.closed{background:color-mix(in srgb,var(--closed) 26%,transparent);color:var(--tx2)}
+.pill.unknown{background:var(--panel3);color:var(--tx3)}
+.grid{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1fr);gap:10px;align-items:start}
+@media(max-width:920px){.grid{grid-template-columns:1fr}}
+.pane{background:var(--panel);border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.pane>h3{margin:0;padding:8px 12px;font:600 9.5px/1.5 "IBM Plex Mono",monospace;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--tx3);background:var(--panel2);border-bottom:1px solid var(--line);
+  display:flex;justify-content:space-between;gap:10px}
+.filters{display:flex;flex-wrap:wrap;gap:5px;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--panel2)}
+.f{background:var(--panel3);color:var(--tx2);border:1px solid var(--line2);border-radius:2px;
+  font:500 10px/1 "IBM Plex Mono",monospace;letter-spacing:.07em;text-transform:uppercase;padding:5px 9px;cursor:pointer}
+.f:hover{color:var(--tx)}
+.f[aria-pressed=true]{background:var(--tx);color:var(--bg);border-color:var(--tx);font-weight:600}
+.f:focus-visible{outline:2px solid var(--warn);outline-offset:1px}
+.rows{max-height:640px;overflow-y:auto}
+.row{display:grid;grid-template-columns:13px 58px 1fr auto;gap:9px;align-items:start;
+  padding:8px 11px 8px 0;border-bottom:1px solid var(--line);cursor:pointer;border-left:3px solid transparent}
+.row:hover{background:var(--panel2)}
+.row[aria-selected=true]{background:var(--panel3);border-left-color:var(--warn)}
+.row.act{border-left-color:var(--active)}
+.row:focus-visible{outline:2px solid var(--warn);outline-offset:-2px}
+.tk{width:8px;height:8px;border-radius:1px;margin:4px 0 0 8px}
+.rt{font-size:10px;color:var(--tx3);line-height:1.35;padding-top:1px}
+.rt b{display:block;color:var(--tx2);font-weight:500}
+.rti{font-size:12px;font-weight:500;line-height:1.35}
+.rlo{font-size:10.5px;color:var(--tx2);margin-top:1px}
+.run{font-size:10px;color:var(--tx3);margin-top:2px}
+.rsq{font-size:9.5px;color:var(--tx3);padding:1px 6px;border:1px solid var(--line2);
+  border-radius:2px;white-space:nowrap;margin-right:10px}
+.mapwrap{padding:6px}
+svg.map{display:block;width:100%;height:auto}
+.coast{fill:#0e161d;stroke:#2b3b48;stroke-width:1.6;stroke-linejoin:round}
+.reflab{fill:#4f6373;font-size:11px;font-family:"IBM Plex Mono",monospace}
+.mk{cursor:pointer}
+.mk circle.hit{fill:transparent}
+.mk circle.dot{stroke:#080b0e;stroke-width:1.2}
+.mk.act circle.dot{animation:pulse 1.4s ease-in-out infinite}
+.mk.sel circle.dot{stroke:var(--warn);stroke-width:2.4}
+.detail{padding:11px 13px;border-top:1px solid var(--line);background:var(--panel2);min-height:132px}
+.dh{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;margin-bottom:6px}
+.bdg{font:600 9.5px/1 "IBM Plex Mono",monospace;letter-spacing:.1em;text-transform:uppercase;padding:3px 7px;border-radius:2px}
+.dt{font-size:14px;font-weight:600}
+.dg{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-top:8px}
+.dl{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3)}
+.dv{font-size:12px;margin-top:1px;font-family:"IBM Plex Mono",monospace}
+.dn{font-size:11.5px;color:var(--tx2);margin-top:9px;padding-top:8px;border-top:1px solid var(--line);line-height:1.55}
+.dn b{color:var(--tx)}
+.dn a{color:var(--tech)}
+.srcbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.src{background:var(--panel);padding:8px 11px;font-family:"IBM Plex Mono",monospace}
+.sn{font-size:10.5px;color:var(--tx)}
+.sm{font-size:9.5px;color:var(--tx3);margin-top:2px}
+.st{font-size:9px;letter-spacing:.09em;text-transform:uppercase;margin-top:3px}
+.legend{display:flex;flex-wrap:wrap;gap:12px;padding:8px 12px;border-top:1px solid var(--line);
+  background:var(--panel2);font-size:10px;color:var(--tx2);font-family:"IBM Plex Mono",monospace}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:9px;height:9px;border-radius:1px}
+footer{font-size:10.5px;color:var(--tx3);line-height:1.6}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<div class="topbar">
+  <div>
+    <div class="brand">Vatro<span>CAD</span></div>
+    <div class="brandsub" id="scope">connecting…</div>
+  </div>
+  <div class="sp"></div>
+  <div class="led" id="feedled"><i></i><span id="feedtxt">connecting…</span></div>
+  <button class="rf" id="refresh">Refresh now</button>
+  <div><div id="clock" class="mono">--:--:--</div><div class="cl mono">LOCAL CEST</div></div>
+</div>
+
+<div class="kpis" id="kpis"></div>
+
+<div class="active-strip" id="activewrap" hidden>
+  <h3><i></i><span>Active incidents · na terenu</span></h3>
+  <div class="acards" id="acards"></div>
+</div>
+
+<div class="grid">
+  <div class="pane">
+    <h3><span>Intervention log · chronological</span><span id="shown" class="mono"></span></h3>
+    <div class="filters" id="filters">
+      <button class="f" data-k="cat" data-v="all" aria-pressed="true">All</button>
+      <button class="f" data-k="cat" data-v="fire" aria-pressed="false">Požar</button>
+      <button class="f" data-k="cat" data-v="tech" aria-pressed="false">Tehnička</button>
+      <button class="f" data-k="cat" data-v="ems" aria-pressed="false">HMP</button>
+      <button class="f" data-k="cat" data-v="accident" aria-pressed="false">Nesreće</button>
+      <button class="f" data-k="cat" data-v="rescue" aria-pressed="false">HGSS</button>
+      <button class="f" data-k="cat" data-v="other" aria-pressed="false">Ostalo</button>
+      <span style="width:10px"></span>
+      <button class="f" data-k="reg" data-v="all" aria-pressed="true">All areas</button>
+      <button class="f" data-k="reg" data-v="sib" aria-pressed="false">Šibenik-Knin</button>
+      <button class="f" data-k="reg" data-v="med" aria-pressed="false">Međimurje</button>
+      <button class="f" data-k="reg" data-v="zag" aria-pressed="false">Zagreb</button>
+      <span style="width:10px"></span>
+      <button class="f" data-k="win" data-v="live" aria-pressed="true" id="winlive">Live · 12h</button>
+      <button class="f" data-k="win" data-v="recent" aria-pressed="false">Recent · 3d</button>
+    </div>
+    <div class="rows" id="rows"></div>
+    <div class="legend">
+      <span><i style="background:var(--fire)"></i>Požar</span>
+      <span><i style="background:var(--tech)"></i>Tehnička</span>
+      <span><i style="background:var(--ems)"></i>Asistencija HMP</span>
+      <span><i style="background:var(--accident)"></i>Nesreća s ozlijeđenima</span>
+      <span><i style="background:var(--rescue)"></i>Spašavanje (HGSS)</span>
+      <span><i style="background:var(--other)"></i>Ostalo</span>
+    </div>
+  </div>
+
+  <div class="pane">
+    <h3><span>Geo plot · Croatia</span><span class="mono">WGS84 → equirect</span></h3>
+    <div class="mapwrap">
+      <svg class="map" viewBox="0 0 645 642" role="img" aria-label="Interventions plotted on a map of Croatia">
+        <path class="coast" d="M18.7,170.8 L52.0,153.3 L119.6,150.4 L171.6,169.4 L202.8,135.8 L241.3,112.4 L280.8,74.5 L314.1,36.5 L334.9,19.0 L379.6,39.4 L436.8,102.2 L499.2,127.0 L572.0,115.3 L626.1,211.7 L582.4,221.9 L520.0,229.2 L462.8,233.6 L395.2,217.5 L332.8,238.0 L286.0,255.5 L280.8,311.0 L312.0,350.4 L379.6,445.3 L431.6,525.6 L457.6,550.4 L488.8,582.5 L532.5,620.5 L499.2,603.0 L436.8,547.5 L374.4,500.8 L314.1,459.9 L255.8,427.8 L189.3,369.4 L153.9,296.4 L119.6,226.3 L106.1,191.3 L72.8,226.3 L52.0,270.1 L22.9,229.2 L15.6,194.2 Z"/>
+        <g>
+          <text class="reflab" x="276" y="126">Zagreb</text>
+          <text class="reflab" x="288" y="34" text-anchor="end">Čakovec</text>
+          <text class="reflab" x="117" y="196">Rijeka</text>
+          <text class="reflab" x="543" y="164" text-anchor="end">Osijek</text>
+          <text class="reflab" x="324" y="462">Split</text>
+        </g>
+        <g id="markers"></g>
+      </svg>
+    </div>
+    <div class="detail" id="detail"></div>
+  </div>
+</div>
+
+<div class="srcbar" id="srcbar"></div>
+<footer id="foot"></footer>
+</div>
+
+<!-- Supabase JS client (UMD → global `supabase`) for the realtime websocket.
+     Loaded from a CDN; if it or the socket is unreachable the console falls back
+     to plain REST polling on its own, so the page still works fully offline-of-CDN. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+
+<script>
+// ── Supabase config ─────────────────────────────────────────────────────────
+// Publishable (read-only) key — safe to ship in the browser. Row-level security
+// permits SELECT only; writes are rejected. The poller uses the secret
+// service_role key, which lives only in CI, never here.
+const SB_URL = "https://ofzwkanpjhdvlygrhbum.supabase.co";
+const SB_KEY = "sb_publishable_l3UZaMzvgu_8nknqN-xB7g_VZauptFm";
+const LIVE_HOURS = 12, MAX_AGE_DAYS = 3;
+
+// Projection must match vatrocad.py's gazetteer coordinates.
+const LON0=13.4, LAT1=46.65, KX=104.0, KY=146.0;
+const px = (lon,lat) => [ (lon-LON0)*KX, (LAT1-lat)*KY ];
+const CN={fire:"Požar",tech:"Tehnička",ems:"Asistencija HMP",accident:"Nesreća",rescue:"Spašavanje HGSS",other:"Ostalo",
+          weather:"Upozorenje",summary:"Sažetak"};
+const SN={active:"Aktivan · na terenu",contained:"Lokaliziran",closed:"Ugašen · završen",unknown:"—"};
+let DATA={incidents:[],context:[],sources:[]}, F={cat:"all",reg:"all",win:"live"}, sel=null;
+// ROWS is the single source of truth: raw DB rows keyed by id. REST fills it on
+// load; realtime patches it row-by-row. rebuild() derives everything from it.
+const ROWS=new Map();
+let lastSync=0, rtStatus="connecting";   // connecting | live | polling | offline
+
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const cestHM=ms=>{const n=new Date(ms),p=x=>String(x).padStart(2,"0");
+  const c=new Date(n.getTime()+n.getTimezoneOffset()*6e4+2*36e5);return `${p(c.getHours())}:${p(c.getMinutes())}`;};
+
+// Event timestamp in CEST. No time on record → 00:00, so an undated-by-hour
+// event ages out of the live band sooner rather than lingering in it.
+const tsOf=(d,t)=>new Date(`${d}T${t&&/^\d{2}:\d{2}$/.test(t)?t:"00:00"}:00+02:00`).getTime();
+const nowMs=()=>Date.now();
+const ageMs=i=>nowMs()-tsOf(i.date,i.time);
+const isLive=i=>ageMs(i)<=LIVE_HOURS*36e5;
+const isRecent=i=>ageMs(i)<=MAX_AGE_DAYS*864e5;
+function ageLabel(i){
+  const h=Math.max(0,Math.round(ageMs(i)/36e5));
+  return h<1?"just now":h<24?`${h}h ago`:`${Math.round(h/24)}d ago`;
+}
+const isActive=i=>i.status==="active"||i.status==="contained";
+
+function vis(){
+  return DATA.incidents.filter(i =>
+    (F.cat==="all"||i.category===F.cat) && (F.reg==="all"||i.region===F.reg) &&
+    (F.win==="recent"?isRecent(i):isLive(i)));
+}
+
+function kpis(){
+  const inc=DATA.incidents, live=inc.filter(isLive), c=k=>live.filter(i=>i.category===k).length;
+  const active=inc.filter(i=>isActive(i)&&isRecent(i)).length;
+  const dig=DATA.context.find(x=>x.category==="summary" && x.source.startsWith("HVZ"));
+  const mup=DATA.context.find(x=>x.category==="summary" && x.source.startsWith("MUP"));
+  let nat="—", cas="—";
+  try{ nat=JSON.parse(dig?.raw||"{}").interventions ?? "—"; }catch(e){}
+  try{ const r=JSON.parse(mup?.raw||"{}"); cas=r.injured!=null?`${r.injured}`:"—"; }catch(e){}
+  const wx=DATA.context.filter(x=>x.category==="weather").length;
+  $("kpis").innerHTML=[
+    [`Live · ${LIVE_HOURS}h`,live.length,""],["Active on scene",active,active?"var(--active)":""],
+    ["Fire",c("fire"),"var(--fire)"],["Technical",c("tech"),"var(--tech)"],
+    ["HMP assist",c("ems"),"var(--ems)"],["Injury accidents",c("accident"),"var(--accident)"],
+    ["Fire ops last night",nat,""],["Injured on roads · RH",cas,"var(--accident)"]
+  ].map(([l,v,col])=>`<div class="kpi"><div class="l">${l}</div>
+      <div class="v mono" ${col?`style="color:${col}"`:""}>${v}</div></div>`).join("");
+}
+
+function activeStrip(){
+  const a=DATA.incidents.filter(i=>isActive(i)&&isRecent(i))
+    .sort((x,y)=>tsOf(y.date,y.time)-tsOf(x.date,x.time));
+  if(!a.length){ $("activewrap").hidden=true; return; }
+  $("activewrap").hidden=false;
+  $("acards").innerHTML=a.map(i=>`
+    <div class="acard" data-id="${esc(i.id)}" style="border-left-color:var(--${i.category})">
+      <div class="at">${esc(i.title)}</div>
+      <div class="am"><span class="pill ${i.status}">${esc(i.status)}</span> ${esc(i.location||"")} · ${esc(i.time||"—")}</div>
+      <div class="au mono">${esc(i.units||"—")}</div>
+    </div>`).join("");
+}
+
+function draw(){
+  const v=vis();
+  $("shown").textContent=v.length+" shown";
+  $("rows").innerHTML = v.length ? v.map(i=>`
+    <div class="row ${isActive(i)?"act":""}" tabindex="0" role="option" aria-selected="${sel===i.id}" data-id="${esc(i.id)}">
+      <div class="tk" style="background:var(--${i.category})"></div>
+      <div class="rt mono"><b>${esc(i.date.slice(8))}.${esc(i.date.slice(5,7))}.</b>${esc(i.time||"—")}<span style="display:block;color:${isLive(i)?"var(--ok)":"var(--tx3)"}">${ageLabel(i)}</span></div>
+      <div>
+        <div class="rti">${esc(i.title)} ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}">${esc(i.status)}</span>`:""}</div>
+        <div class="rlo mono">${esc(i.location||"")}</div>
+        <div class="run">${esc(i.units||"")}</div>
+      </div>
+      <div class="rsq mono">${esc(i.ref||"")}</div>
+    </div>`).join("")
+    : `<div style="padding:26px;text-align:center;color:var(--tx3)">No calls match this filter.</div>`;
+
+  // Calls geocode to settlement centroids, so a village brigade lands every marker
+  // on one point. Fan co-located calls out on a deterministic golden-angle spiral.
+  const placed=v.filter(i=>i.lat!=null), seen={};
+  $("markers").innerHTML = placed.map(i=>{
+    let [x,y]=px(i.lon,i.lat);
+    const key=`${i.lat.toFixed(3)},${i.lon.toFixed(3)}`;
+    const n=(seen[key]=(seen[key]||0)+1)-1;
+    if(n){ const a=n*2.399, r=3.4*Math.sqrt(n); x+=r*Math.cos(a); y+=r*Math.sin(a); }
+    return `<g class="mk ${sel===i.id?"sel":""} ${isActive(i)?"act":""}" data-id="${esc(i.id)}" tabindex="0" role="button"
+        aria-label="${esc(i.title)}">
+      <circle class="hit" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="10"></circle>
+      <circle class="dot" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.2" fill="var(--${i.category})"></circle>
+      <title>${esc(i.ref)} — ${esc(i.title)}${n?" (stacked at "+esc(i.location)+")":""}</title></g>`;
+  }).join("");
+  kpis(); activeStrip();
+}
+
+function detail(i){
+  const d=$("detail");
+  if(!i){ d.innerHTML=`<div style="color:var(--tx3);font-size:12px;padding-top:30px;text-align:center">
+    Select a call from the log or a marker on the map.</div>`; return; }
+  d.innerHTML=`
+    <div class="dh"><span class="bdg" style="background:color-mix(in srgb,var(--${i.category}) 18%,transparent);
+      color:var(--${i.category})">${CN[i.category]||i.category}</span>
+      ${i.status&&i.status!=="unknown"?`<span class="pill ${i.status}">${esc(i.status)}</span>`:""}
+      <span class="dt">${esc(i.title)}</span></div>
+    <div class="dg">
+      <div><div class="dl">Ref</div><div class="dv">${esc(i.ref||"—")}</div></div>
+      <div><div class="dl">Date</div><div class="dv">${esc(i.date)}</div></div>
+      <div><div class="dl">Dojava</div><div class="dv">${esc(i.time||"—")}</div></div>
+      <div><div class="dl">Location</div><div class="dv">${esc(i.location||"—")}</div></div>
+      <div><div class="dl">Status</div><div class="dv">${esc(SN[i.status]||i.status||"—")}</div></div>
+      <div><div class="dl">Crew</div><div class="dv">${i.crew??"—"}${i.vehicles?" · "+i.vehicles+" veh":""}</div></div>
+    </div>
+    <div class="dn"><b>Units:</b> ${esc(i.units||"—")}<br>
+      <b>Source:</b> ${esc(i.source)} ${i.link?`· <a href="${esc(i.link)}" target="_blank" rel="noopener">open</a>`:""}
+      ${i.raw?`<br><br>${esc(i.raw)}`:""}</div>`;
+}
+
+function pick(id){
+  sel = sel===id ? null : id;
+  draw(); detail([...DATA.incidents,...DATA.context].find(i=>i.id===sel));
+}
+$("rows").addEventListener("click",e=>{const r=e.target.closest(".row"); if(r)pick(r.dataset.id);});
+$("rows").addEventListener("keydown",e=>{const r=e.target.closest(".row");
+  if(r&&(e.key==="Enter"||e.key===" ")){e.preventDefault();pick(r.dataset.id);}});
+$("acards").addEventListener("click",e=>{const c=e.target.closest(".acard"); if(c)pick(c.dataset.id);});
+$("markers").addEventListener("click",e=>{const g=e.target.closest(".mk"); if(g)pick(g.dataset.id);});
+$("markers").addEventListener("keydown",e=>{const g=e.target.closest(".mk");
+  if(g&&(e.key==="Enter"||e.key===" ")){e.preventDefault();pick(g.dataset.id);}});
+$("filters").addEventListener("click",e=>{
+  const b=e.target.closest(".f"); if(!b)return;
+  F[b.dataset.k]=b.dataset.v; sel=null;
+  document.querySelectorAll(`.f[data-k="${b.dataset.k}"]`).forEach(o=>
+    o.setAttribute("aria-pressed",String(o===b)));
+  draw(); detail(null);
+});
+
+// Map one Supabase row (DB column names) onto the shape the console renders.
+function mapRow(r){
+  return {id:r.id,source:r.source,region:r.region,ref:r.ref,date:r.occurred,time:r.occurred_time,
+    category:r.category,status:r.status||"unknown",title:r.title,location:r.location,
+    lat:r.lat,lon:r.lon,units:r.units,crew:r.crew,vehicles:r.vehicles,raw:r.raw,link:r.link,
+    first_seen:r.first_seen,last_seen:r.last_seen};
+}
+
+function srcTiers(){
+  // Derive the source health bar from the rows themselves — one card per source,
+  // tiered by how fresh its newest event is. No server round-trip needed.
+  const all=[...DATA.incidents,...DATA.context], by={};
+  all.forEach(i=>{
+    const s=by[i.source]||(by[i.source]={name:i.source,count:0,freshest:0});
+    s.count++; const t=tsOf(i.date,i.time); if(t>s.freshest)s.freshest=t;
+  });
+  const tier=s=>s.freshest>=nowMs()-LIVE_HOURS*36e5?1
+              :s.freshest>=nowMs()-MAX_AGE_DAYS*864e5?2:3;
+  const srcs=Object.values(by).sort((a,b)=>tier(a)-tier(b)||b.freshest-a.freshest);
+  $("srcbar").innerHTML=srcs.map(s=>{
+    const t=tier(s);
+    const col=["","var(--ok)","var(--accident)","var(--warn)"][t];
+    const lab=["","LIVE","RECENT","STALE"][t];
+    const fresh=new Date(s.freshest);
+    const p=x=>String(x).padStart(2,"0");
+    const fs=`${p(fresh.getDate())}.${p(fresh.getMonth()+1)}. ${p(fresh.getHours())}:${p(fresh.getMinutes())}`;
+    return `<div class="src"><div class="sn">${esc(s.name)}</div>
+      <div class="st" style="color:${col}">● ${lab} — ${s.count} rows</div>
+      <div class="sm">newest ${esc(fs)}</div></div>`;}).join("");
+}
+
+function syncHeader(){
+  const mode=rtStatus==="live"?"realtime ◉":rtStatus==="polling"?"polling":rtStatus==="offline"?"unreachable":"connecting…";
+  $("feedtxt").textContent=`supabase · ${mode} · ${ROWS.size} rows${lastSync?" · "+cestHM(lastSync):""}`;
+  $("feedled").classList.toggle("b", rtStatus==="offline");
+}
+
+// Rebuild the whole view from ROWS. Called after a full REST load and after every
+// realtime patch, so a single INSERT repaints exactly like a fresh fetch would.
+function rebuild(){
+  const all=[...ROWS.values()].map(mapRow)
+    .sort((a,b)=>tsOf(b.date,b.time)-tsOf(a.date,a.time));
+  DATA.incidents=all.filter(i=>i.category!=="summary"&&i.category!=="weather");
+  DATA.context  =all.filter(i=>i.category==="summary"||i.category==="weather");
+  const live=DATA.incidents.filter(isLive).length;
+  const act =DATA.incidents.filter(i=>isActive(i)&&isRecent(i)).length;
+  $("scope").textContent=`${live} live · ${act} active · ${DATA.incidents.length} in last ${MAX_AGE_DAYS}d · ${new Set(all.map(i=>i.source)).size} sources`;
+  srcTiers(); draw();
+  if(sel) detail([...DATA.incidents,...DATA.context].find(i=>i.id===sel));
+  syncHeader();
+}
+
+async function load(){
+  try{
+    const url=`${SB_URL}/rest/v1/incidents?select=*&order=ts.desc.nullslast&limit=2000`;
+    const r=await fetch(url,{headers:{apikey:SB_KEY,Authorization:`Bearer ${SB_KEY}`},cache:"no-store"});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const rows=await r.json();
+    ROWS.clear(); rows.forEach(row=>ROWS.set(row.id,row));
+    lastSync=Date.now();
+    if(rtStatus!=="live") rtStatus="polling";   // realtime, once up, owns the status
+    rebuild();
+  }catch(e){
+    rtStatus="offline"; $("scope").textContent="offline"; syncHeader();
+  }
+}
+
+// Open the realtime channel. Every INSERT/UPDATE/DELETE on public.incidents that
+// the read policy exposes arrives here and patches ROWS in place. If the client
+// script or the socket is unavailable, we simply stay on the polling fallback.
+function startRealtime(){
+  if(typeof supabase==="undefined"||!supabase.createClient){ if(rtStatus!=="offline")rtStatus="polling"; syncHeader(); return; }
+  const client=supabase.createClient(SB_URL,SB_KEY,{realtime:{params:{eventsPerSecond:5}}});
+  client.channel("vatrocad-incidents")
+    .on("postgres_changes",{event:"*",schema:"public",table:"incidents"},payload=>{
+      if(payload.eventType==="DELETE"){ if(payload.old?.id) ROWS.delete(payload.old.id); }
+      else if(payload.new?.id){ ROWS.set(payload.new.id,payload.new); }
+      lastSync=Date.now(); rebuild();
+    })
+    .subscribe(status=>{
+      if(status==="SUBSCRIBED"){ rtStatus="live"; syncHeader(); }
+      else if(rtStatus==="live"&&(status==="CHANNEL_ERROR"||status==="TIMED_OUT"||status==="CLOSED")){
+        rtStatus="polling"; syncHeader();   // 30s poll takes over automatically
+      }
+    });
+}
+
+$("refresh").addEventListener("click",async()=>{
+  const b=$("refresh"); b.disabled=true; b.textContent="Syncing…";
+  try{ await load(); } finally{ b.disabled=false; b.textContent="Refresh now"; }
+});
+function tick(){
+  const n=new Date(), p=x=>String(x).padStart(2,"0");
+  const c=new Date(n.getTime()+n.getTimezoneOffset()*6e4+2*36e5);
+  $("clock").textContent=`${p(c.getHours())}:${p(c.getMinutes())}:${p(c.getSeconds())}`;
+}
+tick(); setInterval(tick,1000);
+
+$("foot").innerHTML=`Live from a <b>Supabase</b> Postgres backend over a realtime websocket
+  (read-only publishable key, row-level security; falls back to 30s REST polling if the socket drops).
+  Rows are pushed by <code>vatrocad.py</code>, which polls Croatia's public brigade, ŽVOC, police and
+  HVZ pages. Dispatch itself runs on HVZ's closed <b>UVI/VATROnet</b>; these public pages are the only
+  open surface. Window: live = ${LIVE_HOURS}h, log capped at ${MAX_AGE_DAYS} days.`;
+
+load().then(startRealtime);
+// Fast poll only until realtime is confirmed up; a slow safety re-sync always runs
+// so a missed websocket event can never leave the board stale for long.
+setInterval(()=>{ if(rtStatus!=="live") load(); }, 30000);
+setInterval(load, 5*60*1000);
+detail(null);
+</script>
+</body>
+</html>

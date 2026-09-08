@@ -1,0 +1,45 @@
+# VatroCAD poller — runs vatrocad.py once on a schedule and upserts the
+# incidents it parses into Supabase. Free on GitHub Actions.
+#
+# Setup (one time):
+#   1. Copy this file to  .github/workflows/vatrocad-poll.yml  at your repo root.
+#   2. Put the vatrocad/ folder (vatrocad.py etc.) at your repo root.
+#   3. Repo → Settings → Secrets and variables → Actions → New repository secret:
+#        SUPABASE_URL          = https://ofzwkanpjhdvlygrhbum.supabase.co
+#        SUPABASE_SERVICE_KEY  = <the service_role key from Supabase → Settings → API>
+#      The service_role key bypasses row-level security to WRITE. It must live
+#      only here as a secret — never in index.html or any client code.
+#
+# Cadence: every 15 minutes. These are small volunteer-brigade servers; do not
+# drop below ~5 minutes. GitHub also throttles cron under load, so a tick may
+# arrive a few minutes late — that is fine for a 12-hour live window.
+
+name: VatroCAD poll
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"     # every 15 minutes (UTC)
+  workflow_dispatch: {}         # lets you run it by hand from the Actions tab
+
+concurrency:
+  group: vatrocad-poll
+  cancel-in-progress: false     # never overlap two polls
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # vatrocad.py is stdlib-only — nothing to pip install.
+      - name: Poll sources and push to Supabase
+        working-directory: vatrocad
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python3 vatrocad.py --once

@@ -1,0 +1,49 @@
+# Publishes the VatroCAD dispatch console (vatrocad/index.html) to GitHub Pages.
+# The page reads Supabase directly with the read-only publishable key baked into
+# it, so the static site needs no server and no secrets.
+#
+# Setup (one time):
+#   1. Copy this file to  .github/workflows/vatrocad-pages.yml  at your repo root.
+#   2. Repo → Settings → Pages → Build and deployment → Source: "GitHub Actions".
+#   3. Push. The site appears at  https://<user>.github.io/<repo>/
+#
+# It redeploys on every push that touches vatrocad/index.html.
+
+name: VatroCAD pages
+
+on:
+  push:
+    branches: [ main ]
+    paths: [ "vatrocad/index.html" ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ship only the console file as the site root (index.html → the landing page).
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp vatrocad/index.html _site/index.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
