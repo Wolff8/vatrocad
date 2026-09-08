@@ -154,8 +154,17 @@ def translate_rows(conn, rows):
             return False
         return (today - d).days <= MT_WINDOW_DAYS.get(r.get("region"), 4)
 
-    for r in sorted(rows, key=lambda r: (r.get("date", ""), r.get("time", "")), reverse=True):
+    # Newest first; within the same day, do the few Austrian border reports
+    # before the large Croatian set so the belt the user watches is never
+    # starved by the HR backlog when the daily word budget runs low.
+    order = sorted(rows, key=lambda r: (r.get("date", ""), r.get("country") == "AT",
+                                        r.get("time", "")), reverse=True)
+    for r in order:
         country, region = r.get("country", "HR"), r.get("region")
+        # Weather/national-summary rows are context (KPI counts), never shown as
+        # incidents — don't spend translation budget on them.
+        if r.get("category") in ("summary", "weather"):
+            continue
         src = "de" if country == "AT" else "hr"
         t_sl, raw_sl = known.get(r["id"], (None, None))
         # Austrian dispatch: the title is glossed Slovenian already; gloss the
@@ -169,12 +178,9 @@ def translate_rows(conn, rows):
                     t_sl = mm_translate(conn, r.get("title") or "", src); calls += 1
                 if raw_sl is None and not _mt_stop and calls < MT_CALLS_PER_CYCLE:
                     raw_sl = mm_translate(conn, r.get("raw") or "", src); calls += 1
-            # Fallbacks so the row always carries *something* Slovenian-leaning:
-            # the German glossary for AT, the (readable) Croatian original for HR.
-            if t_sl is None:
-                t_sl = at_translate(r.get("title") or "") if src == "de" else r.get("title")
-            if raw_sl is None:
-                raw_sl = at_translate(r.get("raw") or "") if src == "de" else None
+            # No usable translation yet → leave it None. The console then shows
+            # the clean original (the glossary is for dispatch type-codes and
+            # would only half-translate a free-text report title into gibberish).
         r["title_sl"] = t_sl
         r["raw_sl"] = raw_sl
         if (t_sl, raw_sl) != known.get(r["id"]):
@@ -2121,6 +2127,15 @@ def db():
             conn.execute(f"ALTER TABLE incidents ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+    # One-shot: the first translation run stored glossary/original fallbacks in
+    # title_sl. Those "look done" and would block a real translation forever, so
+    # clear them once — the border-report gibberish and the HR titles that only
+    # echo the original — and let MyMemory redo them (cache-backed, so cheap).
+    if not conn.execute("SELECT 1 FROM meta WHERE k='tsl_reset1'").fetchone():
+        with conn:
+            conn.execute("UPDATE incidents SET title_sl=NULL, raw_sl=NULL WHERE region IN ('stmk','ktn')")
+            conn.execute("UPDATE incidents SET title_sl=NULL WHERE title_sl=title")
+            conn.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('tsl_reset1','1')")
     return conn
 
 
