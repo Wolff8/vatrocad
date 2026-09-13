@@ -1,20 +1,20 @@
-# Publishes the VatroCAD dispatch console (vatrocad/index.html) to GitHub Pages.
-# The page reads Supabase directly with the read-only publishable key baked into
-# it, so the static site needs no server and no secrets.
+# Builds the VatroCAD dispatch console (vatrocad/web, Vite + TypeScript) and
+# publishes dist/ to GitHub Pages. The page reads Supabase directly with the
+# read-only publishable key baked into the bundle, so the static site needs no
+# server and no secrets.
 #
 # Setup (one time):
-#   1. Copy this file to  .github/workflows/vatrocad-pages.yml  at your repo root.
-#   2. Repo → Settings → Pages → Build and deployment → Source: "GitHub Actions".
-#   3. Push. The site appears at  https://<user>.github.io/<repo>/
+#   1. Repo → Settings → Pages → Build and deployment → Source: "GitHub Actions".
+#   2. Push. The site appears at  https://<user>.github.io/<repo>/
 #
-# It redeploys on every push that touches vatrocad/index.html.
+# It redeploys on every push to main that touches vatrocad/web/**.
 
 name: VatroCAD pages
 
 on:
   push:
     branches: [ main ]
-    paths: [ "vatrocad/index.html" ]
+    paths: [ "vatrocad/web/**", ".github/workflows/vatrocad-pages.yml" ]
   workflow_dispatch: {}
 
 permissions:
@@ -32,18 +32,30 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    defaults:
+      run:
+        working-directory: vatrocad/web
     steps:
       - uses: actions/checkout@v4
 
-      # Ship only the console file as the site root (index.html → the landing page).
-      - name: Assemble site
-        run: |
-          mkdir -p _site
-          cp vatrocad/index.html _site/index.html
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: vatrocad/web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build (base /vatrocad/)
+        run: npm run build
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: vatrocad/web/dist
       - id: deployment
         uses: actions/deploy-pages@v4

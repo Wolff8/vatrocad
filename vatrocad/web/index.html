@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="sl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="VatroCAD – dispečerska konzola za intervencije gasilcev, reševalcev in policije na Hrvaškem in v obmejni Avstriji.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="VatroCAD">
+<title>VatroCAD · dispečerska konzola</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+</head>
+<body data-view="list">
+<a class="skip" href="#list">Na seznam dogodkov</a>
+
+<header class="top" role="banner">
+  <h1 class="brand">Vatro<b>CAD</b></h1>
+  <div class="led" id="led" aria-live="polite"><i aria-hidden="true"></i><span id="ledTxt">povezujem…</span></div>
+  <span class="clock mono" id="clock" aria-hidden="true"></span>
+  <button type="button" class="ibtn" id="notifyBtn" aria-pressed="false" aria-label="Obvestila o novih aktivnih dogodkih" title="Obvestila o novih aktivnih dogodkih" hidden><svg class="ic" aria-hidden="true"><use href="#i-bell"/></svg></button>
+  <button type="button" class="rbtn" id="refreshBtn" aria-label="Osveži podatke in poberi s virov" title="Osveži"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><span class="rl">Osveži</span></button>
+</header>
+
+<main id="main">
+  <div class="col-list">
+    <nav class="seg" id="seg" aria-label="Država"></nav>
+    <div class="tools">
+      <label class="search"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="q" type="search" placeholder="Išči kraj, vrsto, enoto…" autocomplete="off" aria-label="Iskanje po dogodkih" enterkeyhint="search"></label>
+      <div class="view" role="tablist" aria-label="Pogled">
+        <button type="button" role="tab" data-v="list" aria-selected="true"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg><span class="vl">Seznam</span></button>
+        <button type="button" role="tab" data-v="map" aria-selected="false"><svg class="ic" aria-hidden="true"><use href="#i-map"/></svg><span class="vl">Zemljevid</span></button>
+      </div>
+    </div>
+    <div class="rail" id="rail" aria-label="Hitri filtri"></div>
+    <div class="stats" id="stats" aria-label="Statistika"></div>
+    <section class="list" id="list" role="listbox" aria-label="Seznam dogodkov"></section>
+  </div>
+  <div class="col-map">
+    <div class="lmap" id="map" role="region" aria-label="Zemljevid dogodkov"></div>
+    <button type="button" class="backpill" id="backToList" hidden><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg> Nazaj na seznam</button>
+  </div>
+</main>
+
+<div class="bk" id="bk" aria-hidden="true"></div>
+
+<aside class="sheet" id="sheet" aria-label="Podrobnosti dogodka">
+  <header class="sh-head"><i class="grab" aria-hidden="true"></i><span class="sh-title">Podrobnosti</span>
+    <button type="button" class="ibtn" data-close aria-label="Zapri podrobnosti"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></header>
+  <div class="sh-body"></div>
+</aside>
+
+<aside class="sheet" id="fsheet" aria-label="Filtri">
+  <header class="sh-head"><i class="grab" aria-hidden="true"></i><span class="sh-title">Filtri</span>
+    <button type="button" class="ibtn" data-clear-filters aria-label="Počisti filtre" title="Počisti filtre"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+    <button type="button" class="ibtn" data-close aria-label="Zapri filtre"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></header>
+  <div class="sh-body"></div>
+</aside>
+
+<aside class="sheet" id="ssheet" aria-label="Stanje virov">
+  <header class="sh-head"><i class="grab" aria-hidden="true"></i><span class="sh-title">Viri podatkov</span>
+    <button type="button" class="ibtn" data-close aria-label="Zapri"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></header>
+  <div class="sh-body"></div>
+</aside>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<footer class="foot">Javni viri: HR gasilske enote, ŽVOC, policija (PU), HVZ, HGSS, HAC, novinarske kronike, Meteoalarm · AT dispečerska sistema Wastl (NÖ) in LFV (OÖ), poročila enot na Štajerskem in Koroškem, deželne policijske direkcije. Zemljevid © Esri.</footer>
+
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -1,5 +1,5 @@
-# VatroCAD poller — runs vatrocad.py once on a schedule and upserts the
-# incidents it parses into Supabase. Free on GitHub Actions.
+# VatroCAD poller — runs vatrocad.py on a schedule and upserts the incidents
+# it parses into Supabase. Free on GitHub Actions.
 #
 # Setup (one time):
 #   1. Copy this file to  .github/workflows/vatrocad-poll.yml  at your repo root.
@@ -10,15 +10,16 @@
 #      The service_role key bypasses row-level security to WRITE. It must live
 #      only here as a secret — never in index.html or any client code.
 #
-# Cadence: ONE job per hour that stays up for 55 minutes and polls every 15
-# minutes on its own clock.
+# Cadence: ONE job at a time that stays up for 55 minutes and polls every 10
+# minutes on its own clock (fast sources every cycle, slow ones every second
+# cycle), then hands over to its successor.
 #
-# Why not just `cron: */15`? Because GitHub does not honour it. Scheduled
+# Why not just `cron: */10`? Because GitHub does not honour it. Scheduled
 # workflows are best-effort and get dropped under load — on this repo a */15
 # schedule fired exactly once in several hours, so the dashboard sat frozen for
 # both countries: nothing was scraping, while the sources themselves were fine.
-# An hourly schedule is honoured far more reliably, and the job's own loop then
-# gives a dependable 15-minute cadence.
+# The job therefore re-dispatches ITSELF as its last step; the single hourly
+# cron only restarts the chain if a runner ever dies mid-flight.
 #
 # The loop also watches public.control.poll_requested_at, which the dashboard's
 # "Osveži" button stamps through the request_poll() RPC, and polls within ~15
@@ -31,12 +32,9 @@ name: VatroCAD poll
 
 on:
   schedule:
-    # Fallbacks only. Even hourly slots get dropped (22:03 UTC on 2026-09-08
-    # never fired and the board went stale for 90 minutes), so the job now
-    # re-dispatches ITSELF as its last step — see "Hand over" below — and these
-    # two crons merely restart the chain if a runner ever dies mid-flight.
+    # Fallback only: restarts the chain if the hand-over ever breaks. A second
+    # cron would only cancel/duplicate a queued hand-over run.
     - cron: "3 * * * *"
-    - cron: "33 * * * *"
   workflow_dispatch: {}         # lets you run it by hand from the Actions tab
 
 permissions:
@@ -55,42 +53,86 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Note the start time
+        id: clock
+        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # The local SQLite holds the Nominatim geocode cache. Runners are
-      # ephemeral, so without this every 15-minute poll would re-geocode the
-      # same ~100 Austrian towns from scratch (~2 minutes of rate-limited
-      # calls, and thousands of needless Nominatim requests a day). A fresh
-      # key per run means the cache is re-saved with new entries every time;
-      # restore-keys pulls the most recent one in.
-      - name: Restore geocode cache
-        uses: actions/cache@v4
+      # The local SQLite holds the Nominatim geocode cache, the article cache,
+      # the ETag/Last-Modified validators, the translation cache and the
+      # content hashes that drive the delta push. Runners are ephemeral, so
+      # without this every poll would start cold. A fresh key per run means
+      # the DB is re-saved with new entries every time; restore-keys pulls the
+      # most recent one in. restore + explicit save so the DB is kept even
+      # when the poll step itself fails.
+      - name: Restore cache DB
+        id: cache
+        uses: actions/cache/restore@v4
         with:
           path: vatrocad/vatrocad.sqlite3
           key: vatrocad-db-${{ github.run_id }}
           restore-keys: |
             vatrocad-db-
 
+      - name: Report cache state
+        run: |
+          echo "cache-hit=${{ steps.cache.outputs.cache-hit }}"
+          echo "matched-key=${{ steps.cache.outputs.cache-matched-key }}"
+          if [ -z "${{ steps.cache.outputs.cache-matched-key }}" ]; then
+            echo "::warning::No cached DB restored — cold start (reduced Nominatim budget this job)"
+            echo "NOMINATIM_BUDGET=15" >> "$GITHUB_ENV"
+          fi
+
       # vatrocad.py is stdlib-only — nothing to pip install.
       - name: Poll sources and push to Supabase
+        id: poll
         working-directory: vatrocad
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python3 vatrocad.py --serve-minutes 55 --interval 900
+        run: python3 vatrocad.py --serve-minutes 55 --interval 600
+
+      - name: Save cache DB
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: vatrocad/vatrocad.sqlite3
+          key: vatrocad-db-${{ github.run_id }}
 
       # Hand over: queue the next run before this one exits. GitHub does not
       # start workflows from events raised with GITHUB_TOKEN — with two
       # exceptions, workflow_dispatch and repository_dispatch, which is what
       # makes this legal. With cancel-in-progress:false the queued run waits
       # for this one to finish and starts immediately after, so the poller is
-      # never down for more than the runner start-up (~20 s). Runs `always()`
-      # so a crashed poll still hands over. To stop the chain, disable the
-      # workflow in the Actions tab.
+      # never down for more than the runner start-up (~20 s).
+      #
+      # Guards against a tight loop of failing runs: the step runs only when
+      # the poll step actually ran (success or failure, never when cancelled),
+      # and if the job lived less than 5 minutes it sleeps out the remainder
+      # first, so a script that crashes on start-up can re-dispatch at most
+      # ~12 times an hour — and the queued-run check skips the dispatch when a
+      # successor is already waiting. To stop the chain, disable the workflow
+      # in the Actions tab.
       - name: Hand over to the next run
-        if: always()
+        if: ${{ !cancelled() && (steps.poll.outcome == 'success' || steps.poll.outcome == 'failure') }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run vatrocad-poll.yml --ref "${{ github.ref_name }}" --repo "${{ github.repository }}"
+        run: |
+          elapsed=$(( $(date +%s) - ${{ steps.clock.outputs.start }} ))
+          if [ "$elapsed" -lt 300 ]; then
+            echo "job ran only ${elapsed}s — sleeping $((300 - elapsed))s before handing over"
+            sleep $((300 - elapsed))
+          fi
+          # A run held back by the concurrency group shows as queued/pending/waiting
+          # depending on the API version — count all three.
+          queued=$(gh run list --workflow vatrocad-poll.yml --limit 20 --json status \
+                   -q '[.[] | select(.status == "queued" or .status == "pending" or .status == "waiting")] | length' \
+                   --repo "${{ github.repository }}" 2>/dev/null || echo 0)
+          if [ "${queued:-0}" -gt 0 ]; then
+            echo "a successor is already queued (${queued}) — not dispatching another"
+            exit 0
+          fi
+          gh workflow run vatrocad-poll.yml --ref "${{ github.ref_name }}" --repo "${{ github.repository }}"

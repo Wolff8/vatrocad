@@ -20,6 +20,7 @@ someone leaves open. Do not lower it much.
 """
 
 import argparse
+import hashlib
 import html as htmllib
 import json
 import os
@@ -31,7 +32,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -44,7 +46,44 @@ LIVE_WINDOW_HOURS = 12
 MAX_AGE_DAYS = 3
 LIVE_WINDOW_DAYS = MAX_AGE_DAYS      # used by the police fetcher to bound article fetches
 UA = "VatroCAD/1.0 (local dashboard; contact: local user)"
-CEST = timezone(timedelta(hours=2))
+
+
+class _CentralEurope(tzinfo):
+    """Fallback for a runner without tzdata: the EU rule (CET, CEST from the last
+    Sunday of March 01:00 UTC to the last Sunday of October 01:00 UTC)."""
+
+    @staticmethod
+    def _last_sunday(year, month):
+        d = datetime(year, month + 1, 1) - timedelta(days=1) if month < 12 else datetime(year, 12, 31)
+        return d - timedelta(days=(d.weekday() + 1) % 7)
+
+    def _dst(self, dt):
+        if dt is None:
+            return False
+        start = self._last_sunday(dt.year, 3).replace(hour=2)        # 02:00 CET = 01:00 UTC
+        end = self._last_sunday(dt.year, 10).replace(hour=3)         # 03:00 CEST = 01:00 UTC
+        return start <= dt.replace(tzinfo=None) < end
+
+    def utcoffset(self, dt):
+        return timedelta(hours=2 if self._dst(dt) else 1)
+
+    def dst(self, dt):
+        return timedelta(hours=1 if self._dst(dt) else 0)
+
+    def tzname(self, dt):
+        return "CEST" if self._dst(dt) else "CET"
+
+
+try:
+    from zoneinfo import ZoneInfo
+    LOCAL = ZoneInfo("Europe/Zagreb")
+    datetime(2026, 1, 1, tzinfo=LOCAL).utcoffset()                 # tzdata really present?
+except Exception:                                                 # noqa: BLE001
+    LOCAL = _CentralEurope()
+# Every source publishes wall-clock time for Croatia/Austria (one zone, DST
+# included). All stamping, cut-offs and "now" go through LOCAL — a fixed +02:00
+# was one hour wrong from the last Sunday of October to the last Sunday of March.
+CEST = LOCAL                                                      # legacy alias
 
 # Supabase (optional). When both are set, every poll upserts incidents into the
 # hosted Postgres so a published dashboard can read them without this machine.
@@ -53,6 +92,16 @@ CEST = timezone(timedelta(hours=2))
 # read-only publishable key instead.
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+SB_TIMEOUT = 15                # seconds per Supabase request (never wait out a dead DB)
+SB_RETRIES = 2                 # extra attempts after the first, with back-off
+SB_BACKOFF = (2, 5)
+SB_CHUNK = 200                 # rows per upsert POST
+SB_PUSH_MAX_AGE_DAYS = 8       # older rows are never (re)pushed — the console shows 8 days
+MAX_WORKERS = 6                # concurrent source fetches (per-host serialised, see fetch)
+FETCH_TIMEOUT = 20
+ARTICLE_CACHE_DAYS = 30        # article bodies are immutable; keep them a month
+ARTICLE_CACHE_MAX = 4000       # and never let the cache table grow past this
+GEO_NEG_CACHE_HOURS = 24       # a Nominatim miss is not retried for a day
 
 # ── Slovenian auto-translation ────────────────────────────────────────────
 # Titles and narratives in these feeds are German (Austria) or Croatian; the
@@ -65,9 +114,12 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 # not yet translated simply shows its original until a later cycle fills it in.
 MT_ENDPOINT = "https://api.mymemory.translated.net/get"
 MT_DAILY_WORDS = 4000          # anonymous free tier is ~5000 words/day per IP; stay under
-MT_CALLS_PER_CYCLE = 45        # bounds job time, not the free tier (the word budget does that)
+MT_CALLS_PER_CYCLE = 30        # bounds cycle time (~1-2 s per call), not the free tier (the word budget does that)
 MT_WINDOW_DAYS = {"stmk": 8, "ktn": 8}   # AT border reports live 7d; others fall back to 4
+MT_CHUNK_BYTES = 450           # MyMemory's documented limit is 500 *bytes* per query
+MT_MAX_CHUNKS = 4              # a 1600-char narrative is ~4 pieces; more is not worth the calls
 _mt_stop = False               # set within a cycle once the quota/budget is spent
+_mt_calls = 0                  # network calls made this cycle (chunks count individually)
 
 
 def _mt_words_today(conn) -> int:
@@ -83,48 +135,125 @@ def _mt_add_words(conn, total: int):
                      (key, str(total), str(total)))
 
 
+def mt_chunks(text: str, limit: int = MT_CHUNK_BYTES):
+    """Split a narrative into sentence-aligned pieces of at most `limit` UTF-8
+    bytes. A sentence longer than the limit is split at commas, then at spaces,
+    so no piece ever exceeds it (Croatian diacritics are two bytes each, which is
+    why the budget is in bytes, not characters)."""
+    text = tidy(text or "")
+    if not text:
+        return []
+    nbytes = lambda s: len(s.encode("utf-8"))
+
+    def split_long(piece, seps):
+        if nbytes(piece) <= limit or not seps:
+            return [piece] if nbytes(piece) <= limit else _hard_split(piece, limit)
+        parts, cur = [], ""
+        for tok in re.split(seps[0], piece):
+            tok = tok.strip()
+            if not tok:
+                continue
+            cand = (cur + " " + tok).strip()
+            if nbytes(cand) <= limit:
+                cur = cand
+            else:
+                if cur:
+                    parts.append(cur)
+                cur = tok if nbytes(tok) <= limit else ""
+                if not cur:
+                    parts.extend(split_long(tok, seps[1:]))
+        if cur:
+            parts.append(cur)
+        return parts
+
+    out, cur = [], ""
+    for sent in re.split(r"(?<=[.!?])\s+", text):
+        for piece in split_long(sent, [r"(?<=,)\s+", r"\s+"]):
+            cand = (cur + " " + piece).strip()
+            if nbytes(cand) <= limit:
+                cur = cand
+            else:
+                if cur:
+                    out.append(cur)
+                cur = piece
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _hard_split(s: str, limit: int):
+    out, cur = [], ""
+    for ch in s:
+        if len((cur + ch).encode("utf-8")) > limit:
+            out.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _mm_call(text: str, src: str):
+    """One MyMemory request. Returns (translation|None, fatal) — fatal means the
+    service or the quota is gone for this cycle; non-fatal means skip this item."""
+    q = urllib.parse.urlencode({"q": text, "langpair": f"{src}|sl"})
+    req = urllib.request.Request(f"{MT_ENDPOINT}?{q}", headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            d = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        return None, e.code in (429, 503)                        # rate limit/outage: stop; 4xx: skip
+    except Exception:                                             # noqa: BLE001
+        return None, True                                         # network — stop for this cycle
+    out = tidy((d.get("responseData") or {}).get("translatedText") or "")
+    up = out.upper()
+    if d.get("quotaFinished") or "USED ALL AVAILABLE" in up or "MYMEMORY WARNING" in up:
+        return None, True
+    status = d.get("responseStatus")
+    if not out or (isinstance(status, int) and status != 200) or "INVALID LANGUAGE PAIR" in up:
+        return None, False
+    time.sleep(0.4)                                              # be polite to a free service
+    return out, False
+
+
 def mm_translate(conn, text: str, src: str):
-    """Translate `text` from `src` (de|hr) into Slovenian, cache-first. Returns the
-    Slovenian string, or None when nothing usable is available (empty input, cache
-    miss with the budget spent, or an API/quota failure). Only genuine translations
-    are cached — a quota warning or error is never stored, so it retries next run."""
-    global _mt_stop
+    """Translate `text` from `src` (de|hr) into Slovenian, cache-first. Long texts
+    go over in sentence-aligned chunks of <= 450 bytes and are joined back; only
+    a complete translation is cached, so a half-done narrative retries next run.
+    Returns None when nothing usable is available (budget/quota spent, outage)."""
+    global _mt_stop, _mt_calls
     text = tidy(text or "")
     if len(text) < 3:
         return text or None
-    import hashlib
     key = f"{src}|{hashlib.md5(text.encode()).hexdigest()}"
     row = conn.execute("SELECT v FROM translate_cache WHERE k=?", (key,)).fetchone()
     if row is not None:
         return row["v"]
     if _mt_stop:
         return None
-    words = len(text.split())
+    chunks = mt_chunks(text)[:MT_MAX_CHUNKS]
+    sent = " ".join(chunks)
+    words = len(sent.split())                                     # budget what is actually sent
     if _mt_words_today(conn) + words > MT_DAILY_WORDS:
         _mt_stop = True
         return None
-    q = urllib.parse.urlencode({"q": text[:500], "langpair": f"{src}|sl"})
-    req = urllib.request.Request(f"{MT_ENDPOINT}?{q}", headers={"User-Agent": UA})
-    try:
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            d = json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception:                                             # noqa: BLE001
-        _mt_stop = True                                           # network/endpoint down — stop for this cycle
-        return None
-    out = tidy((d.get("responseData") or {}).get("translatedText") or "")
-    status = d.get("responseStatus")
-    bad = (not out or d.get("quotaFinished")
-           or (isinstance(status, int) and status != 200)
-           or "MYMEMORY WARNING" in out.upper() or "USED ALL AVAILABLE" in out.upper()
-           or "INVALID LANGUAGE PAIR" in out.upper())
-    if bad:
-        _mt_stop = True                                          # quota hit — don't hammer it further this cycle
-        return None
+    parts = []
+    for piece in chunks:
+        if _mt_calls >= MT_CALLS_PER_CYCLE:
+            return None
+        _mt_calls += 1
+        out, fatal = _mm_call(piece, src)
+        if out is None:
+            if fatal:
+                _mt_stop = True
+            return None
+        parts.append(out)
     _mt_add_words(conn, _mt_words_today(conn) + words)
+    result = " ".join(parts)
     with conn:
-        conn.execute("INSERT OR REPLACE INTO translate_cache(k,v) VALUES(?,?)", (key, out))
-    time.sleep(0.4)                                              # be polite to a free service
-    return out
+        conn.execute("INSERT OR REPLACE INTO translate_cache(k,v) VALUES(?,?)", (key, result))
+    return result
 
 
 def translate_rows(conn, rows):
@@ -134,8 +263,9 @@ def translate_rows(conn, rows):
     only while the day's word budget lasts. Reads the cache for rows done on an
     earlier cycle, writes new translations back to both the DB and the row dict
     (so the very same push carries them to Supabase)."""
-    global _mt_stop
+    global _mt_stop, _mt_calls
     _mt_stop = False
+    _mt_calls = 0
     ids = [r["id"] for r in rows]
     known = {}
     for i in range(0, len(ids), 400):
@@ -144,8 +274,7 @@ def translate_rows(conn, rows):
         for row in conn.execute(
                 f"SELECT id,title_sl,raw_sl FROM incidents WHERE id IN ({qmarks})", chunk):
             known[row["id"]] = (row["title_sl"], row["raw_sl"])
-    today = datetime.now(CEST).date()
-    calls = 0
+    today = datetime.now(LOCAL).date()
 
     def recent(r):
         try:
@@ -173,21 +302,21 @@ def translate_rows(conn, rows):
             t_sl = r.get("title"); raw_sl = at_translate(r.get("raw") or "")
         else:
             need = (t_sl is None or raw_sl is None) and recent(r) and not _mt_stop
-            if need and calls < MT_CALLS_PER_CYCLE:
+            if need and _mt_calls < MT_CALLS_PER_CYCLE:
                 if t_sl is None:
-                    t_sl = mm_translate(conn, r.get("title") or "", src); calls += 1
-                if raw_sl is None and not _mt_stop and calls < MT_CALLS_PER_CYCLE:
-                    raw_sl = mm_translate(conn, r.get("raw") or "", src); calls += 1
+                    t_sl = mm_translate(conn, r.get("title") or "", src)
+                if raw_sl is None and not _mt_stop and _mt_calls < MT_CALLS_PER_CYCLE:
+                    raw_sl = mm_translate(conn, r.get("raw") or "", src)
             # No usable translation yet → leave it None. The console then shows
             # the clean original (the glossary is for dispatch type-codes and
             # would only half-translate a free-text report title into gibberish).
         r["title_sl"] = t_sl
         r["raw_sl"] = raw_sl
-        if (t_sl, raw_sl) != known.get(r["id"]):
+        if r["id"] in known and (t_sl, raw_sl) != known[r["id"]]:
             with conn:
                 conn.execute("UPDATE incidents SET title_sl=?, raw_sl=? WHERE id=?",
                              (t_sl, raw_sl, r["id"]))
-    return f"MT: {calls} klicev, {_mt_words_today(conn)} besed danes" + (" (kvota)" if _mt_stop else "")
+    return f"MT: {_mt_calls} klicev, {_mt_words_today(conn)} besed danes" + (" (kvota)" if _mt_stop else "")
 
 
 def status_of(text: str) -> str:
@@ -204,7 +333,7 @@ def status_of(text: str) -> str:
 
 
 def to_ts(date: str, time_: str):
-    """Combine an event date + HH:MM into an ISO timestamp in CEST, for ordering
+    """Combine an event date + HH:MM into an ISO timestamp in LOCAL (CET/CEST), for ordering
     and the live window. No time on record → midnight (ages out sooner, never
     fakes freshness)."""
     if not date:
@@ -212,7 +341,7 @@ def to_ts(date: str, time_: str):
     hh, mm = (time_.split(":") + ["00", "00"])[:2] if re.match(r"^\d{1,2}:\d{2}$", time_ or "") else ("00", "00")
     try:
         return datetime(int(date[:4]), int(date[5:7]), int(date[8:10]),
-                        int(hh), int(mm), tzinfo=CEST).isoformat()
+                        int(hh), int(mm), tzinfo=LOCAL).isoformat()
     except (ValueError, IndexError):
         return None
 
@@ -245,7 +374,7 @@ def defuture(rows) -> int:
     in the future is a parse bug, never a live call, and the dashboard hides it —
     so fix it here instead of silently losing the row. Weather warnings are
     legitimately future-dated and are left alone."""
-    now = datetime.now(CEST)
+    now = datetime.now(LOCAL)
     fixed = 0
     for r in rows:
         if r.get("category") == "weather":
@@ -263,35 +392,76 @@ def defuture(rows) -> int:
     return fixed
 
 
-def _sb_request(path: str, method: str = "GET", body=None, timeout: int = 25):
-    """Small PostgREST helper for the control row (service-role key)."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return None
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        f"{SUPABASE_URL}/rest/v1/{path}", data=data, method=method,
-        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
-                 "Content-Type": "application/json", "Prefer": "return=representation"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            return json.loads(raw) if raw else []
-    except Exception:                                             # noqa: BLE001
-        return None
+# ── Supabase: one guarded helper for everything ───────────────────────────
+# The database was once unreachable for nine hours while the job spun on 503s
+# with 25-45 s timeouts per call. Every call now has a short timeout, at most
+# two retries with back-off, and a per-cycle circuit breaker: once a call has
+# failed persistently, the rest of the cycle skips Supabase instantly, logs one
+# line, and the poller carries on scraping — the SQLite keeps the truth, and the
+# delta push catches up on the next cycle that gets through.
+_SB = {"down": False, "logged": False, "has_cluster": True}
+
+
+def sb_configured() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
+def sb_reset_cycle():
+    _SB["down"] = False
+    _SB["logged"] = False
+
+
+def sb_call(path: str, method: str = "GET", body=None, prefer: str = "return=representation",
+            timeout: int = SB_TIMEOUT, retries: int = SB_RETRIES):
+    """PostgREST request with the service-role key. Returns (ok, data|error).
+    4xx answers are final (bad request, missing table/column) and are returned
+    to the caller; network failures, 5xx and timeouts are retried, then trip the
+    breaker for this cycle. Never raises."""
+    if not sb_configured():
+        return False, "off"
+    if _SB["down"]:
+        return False, "down"
+    data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
+    err = "?"
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(
+            f"{SUPABASE_URL}/rest/v1/{path}", data=data, method=method,
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                     "Content-Type": "application/json", "Prefer": prefer})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                return True, (json.loads(raw) if raw and prefer.endswith("representation") else [])
+        except urllib.error.HTTPError as e:
+            detail = e.read()[:300].decode("utf-8", "replace")
+            err = f"HTTP {e.code} {detail}"
+            if e.code < 500 and e.code != 429:
+                return False, err                                 # final answer, not an outage
+        except Exception as e:                                    # noqa: BLE001
+            err = type(e).__name__
+        if attempt < retries:
+            time.sleep(SB_BACKOFF[min(attempt, len(SB_BACKOFF) - 1)])
+    _SB["down"] = True
+    if not _SB["logged"]:
+        _SB["logged"] = True
+        print(f"  Supabase ne odgovarja ({err}) — nadaljujem brez sinhronizacije v tem ciklu")
+    return False, err
 
 
 def control_read():
     """Current control row, or None when Supabase is unconfigured/unreachable."""
-    rows = _sb_request("control?id=eq.1&select=*")
-    return rows[0] if rows else None
+    ok, rows = sb_call("control?id=eq.1&select=*", timeout=10)
+    return rows[0] if ok and rows else None
 
 
-def control_write(**fields):
-    if fields:
-        _sb_request("control?id=eq.1", "PATCH", fields)
+def control_write(**fields) -> bool:
+    if not fields or not sb_configured():
+        return True                                               # nothing to write to
+    ok, _ = sb_call("control?id=eq.1", "PATCH", fields, prefer="return=minimal", timeout=10)
+    return ok
 
 
-def serve_loop(conn, minutes: int, interval: int = 900, verbose: bool = True):
+def serve_loop(conn, minutes: int, interval: int = 600, verbose: bool = True):
     """Run as a long-lived poller for `minutes`, then exit.
 
     Why this exists: GitHub's cron is best-effort and was dropping most of the
@@ -300,49 +470,110 @@ def serve_loop(conn, minutes: int, interval: int = 900, verbose: bool = True):
     and polls on its own clock is honoured reliably, and while it is up the
     dashboard can ask for an immediate poll by stamping control.poll_requested_at
     (public.request_poll()), which we notice within ~15 seconds. No credentials
-    ever leave the runner for that: the page only stamps a request."""
+    ever leave the runner for that: the page only stamps a request.
+
+    Cadence: the FAST tier runs every cycle, the SLOW tier every second cycle.
+    A manual request and the first cycle of a job always run everything; the
+    first cycle also re-pushes every row (self-healing against anything a
+    previous outage left behind)."""
     deadline = time.time() + minutes * 60
     handled = None                     # newest request stamp already acted on
     last_poll = 0.0
+    cycle = 0
+    ctl_failures = 0
     while True:
-        row = control_read() or {}
-        req = row.get("poll_requested_at")
+        sb_reset_cycle()
+        row = control_read()
+        ctl_failures = 0 if (row is not None or not sb_configured()) else ctl_failures + 1
+        req = (row or {}).get("poll_requested_at")
         manual = bool(req and req != handled and time.time() - last_poll > 45)
         due = time.time() - last_poll >= interval
         if manual or last_poll == 0.0 or due:
-            handled = req if manual else handled
+            first = last_poll == 0.0
+            full = manual or first or cycle % 2 == 0
             control_write(poll_started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                           runner_until=datetime.fromtimestamp(deadline, timezone.utc).isoformat(timespec="seconds"),
                           note="pobiram s virov…")
-            why = "manual" if manual else ("first" if last_poll == 0.0 else "scheduled")
+            why = "manual" if manual else ("first" if first else "scheduled")
             if verbose:
-                print(f"[{datetime.now(CEST):%H:%M:%S}] poll ({why})")
+                print(f"[{datetime.now(LOCAL):%H:%M:%S}] poll ({why}, {'vsi viri' if full else 'hitri viri'})")
             try:
-                n = poll_once(conn, verbose=verbose)
+                res = poll_once(conn, verbose=verbose, full=full, resync=first)
             except Exception as e:                                # noqa: BLE001
-                n = 0
-                print(f"  poll failed: {type(e).__name__}: {e}")
+                res = {"new": 0, "push_ok": False, "error": f"{type(e).__name__}: {e}"}
+                print(f"  poll failed: {res['error']}")
             last_poll = time.time()
-            control_write(poll_finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                          note=f"{n} novih")
+            cycle += 1
+            if req:
+                handled = req          # honoured (or superseded) whatever the reason for polling
+            n = res.get("new", 0)
+            if res.get("push_ok"):
+                control_write(poll_finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                              note=f"{n} novih")
+            else:
+                # Never stamp a finish the data does not back: the dashboard's
+                # freshness comes from poll_finished_at.
+                control_write(note="Supabase ne odgovarja – podatki niso osveženi")
             if verbose:
-                print(f"[{datetime.now(CEST):%H:%M:%S}] {n} new; next in {interval//60} min "
+                print(f"[{datetime.now(LOCAL):%H:%M:%S}] {n} new; next in {interval//60} min "
                       f"or on request ({(deadline-time.time())/60:.0f} min of runtime left)")
         if time.time() >= deadline:
             control_write(note="pobiralnik miruje – naslednji zagon ob polni uri", runner_until=None)
             if verbose:
                 print("serve window over — exiting so the next hourly run takes over")
             return
-        time.sleep(min(15, max(1, deadline - time.time())))
+        # Read the control row every 15 s while Supabase answers; back off to a
+        # minute once it has failed twice in a row (no point hammering an outage).
+        pause = 60 if ctl_failures >= 2 else 15
+        time.sleep(min(pause, max(1, deadline - time.time())))
 
 
-def push_supabase(rows):
-    """Upsert parsed incidents into Supabase via the PostgREST endpoint. Idempotent
-    (merge on id), so pushing every cycle's full parse is self-healing. No-op when
-    Supabase isn't configured. Never raises — a hosting hiccup must not stop polling."""
-    if not (SUPABASE_URL and SUPABASE_KEY and rows):
-        return "off" if not (SUPABASE_URL and SUPABASE_KEY) else "0"
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+SB_COLUMNS = ("id", "source", "region", "country", "ref", "occurred", "occurred_time", "ts",
+              "category", "status", "title", "location", "lat", "lon", "units", "crew",
+              "vehicles", "raw", "link", "title_sl", "raw_sl", "cluster")
+
+
+def sb_payload(r: dict) -> dict:
+    """The Supabase row for a parsed incident (without last_seen)."""
+    blob = f"{r.get('title', '')} {r.get('raw', '')}"
+    return {
+        "id": r["id"], "source": r["source"], "region": r.get("region"),
+        "country": r.get("country", "HR"),
+        "ref": r.get("ref"), "occurred": r.get("date") or None,
+        "occurred_time": r.get("time") or None, "ts": to_ts(r.get("date", ""), r.get("time", "")),
+        # A source that knows its own status (Austria's dispatch pages do)
+        # passes it explicitly; otherwise derive it from Croatian verbs.
+        "category": r.get("category"), "status": r.get("status") or status_of(blob),
+        "title": r.get("title"), "location": r.get("location"),
+        "lat": r.get("lat"), "lon": r.get("lon"), "units": r.get("units") or None,
+        "crew": r.get("crew"), "vehicles": r.get("vehicles"),
+        "raw": r.get("raw"), "link": r.get("link"),
+        "title_sl": r.get("title_sl"), "raw_sl": r.get("raw_sl"),
+        "cluster": r.get("cluster"),
+    }
+
+
+def content_hash(payload: dict) -> str:
+    """Stable digest of what the dashboard would see — key order and last_seen
+    play no part, so an unchanged row hashes the same on every cycle."""
+    body = {k: v for k, v in payload.items() if k != "last_seen"}
+    return hashlib.md5(json.dumps(body, sort_keys=True, ensure_ascii=False,
+                                  separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def push_supabase(conn, rows, resync: bool = False):
+    """Delta upsert into Supabase. Only rows that are new or whose content hash
+    changed since the last successful push go over, plus NÖ LIVE rows (their
+    last_seen drives the live prune) — and everything once per job (`resync`)
+    so a lost write heals itself. Rows older than SB_PUSH_MAX_AGE_DAYS are never
+    sent: the dashboard shows eight days and the HR archive lives in SQLite.
+    Sent in chunks; one failed chunk never stops the others. Returns
+    (summary, ok) — ok is False only when a chunk could not be written."""
+    if not sb_configured():
+        return "off", True
+    now_utc = datetime.now(timezone.utc)
+    now = now_utc.isoformat(timespec="seconds")
+    min_date = (now_utc.astimezone(LOCAL) - timedelta(days=SB_PUSH_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
     # PostgREST turns one POST into a single INSERT ... ON CONFLICT DO UPDATE, and
     # Postgres refuses to touch the same conflict target twice in one statement
     # (error 21000) — so if two parsed rows in this cycle share an id (an
@@ -352,37 +583,79 @@ def push_supabase(rows):
     by_id = {}
     for r in rows:
         by_id[r["id"]] = r
-    payload = []
+    ids = list(by_id)
+    stored = {}
+    for i in range(0, len(ids), 400):
+        chunk = ids[i:i + 400]
+        for row in conn.execute(f"SELECT id, hash FROM incidents WHERE id IN ({','.join('?' * len(chunk))})", chunk):
+            stored[row["id"]] = row["hash"]
+    todo, skipped_old, unchanged = [], 0, 0
     for r in by_id.values():
-        blob = f"{r.get('title', '')} {r.get('raw', '')}"
-        payload.append({
-            "id": r["id"], "source": r["source"], "region": r.get("region"),
-            "country": r.get("country", "HR"),
-            "ref": r.get("ref"), "occurred": r.get("date") or None,
-            "occurred_time": r.get("time") or None, "ts": to_ts(r.get("date", ""), r.get("time", "")),
-            # A source that knows its own status (Austria's dispatch pages do)
-            # passes it explicitly; otherwise derive it from Croatian verbs.
-            "category": r.get("category"), "status": r.get("status") or status_of(blob),
-            "title": r.get("title"), "location": r.get("location"),
-            "lat": r.get("lat"), "lon": r.get("lon"), "units": r.get("units"),
-            "crew": r.get("crew"), "vehicles": r.get("vehicles"),
-            "raw": r.get("raw"), "link": r.get("link"),
-            "title_sl": r.get("title_sl"), "raw_sl": r.get("raw_sl"), "last_seen": now,
-        })
-    body = json.dumps(payload, ensure_ascii=False).encode()
-    req = urllib.request.Request(
-        f"{SUPABASE_URL}/rest/v1/incidents?on_conflict=id", data=body, method="POST",
-        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
-                 "Content-Type": "application/json",
-                 "Prefer": "resolution=merge-duplicates,return=minimal"})
-    try:
-        with urllib.request.urlopen(req, timeout=45) as resp:
-            dupes = len(rows) - len(payload)
-            return f"pushed {len(payload)} ({resp.status})" + (f", {dupes} in-batch dupes dropped" if dupes else "")
-    except urllib.error.HTTPError as e:
-        return f"error: HTTP {e.code} {e.read()[:400].decode('utf-8', 'replace')}"
-    except Exception as e:                                        # noqa: BLE001
-        return f"error: {type(e).__name__}"
+        p = sb_payload(r)
+        if p["occurred"] and p["occurred"] < min_date:
+            skipped_old += 1
+            continue
+        h = content_hash(p)
+        live = str(p.get("ref") or "").startswith("NOE-LIVE")
+        if not (resync or live or stored.get(r["id"]) != h):
+            unchanged += 1
+            continue
+        p["last_seen"] = now
+        todo.append((p, h))
+    if not todo:
+        return f"nič novega ({unchanged} nespremenjenih, {skipped_old} starejših od {SB_PUSH_MAX_AGE_DAYS} dni)", True
+    sent, rejected, errors = 0, 0, []
+    outage = False
+    for i in range(0, len(todo), SB_CHUNK):
+        if _SB["down"]:
+            outage = True
+            break
+        s, rj, errs = _push_chunk(conn, todo[i:i + SB_CHUNK])
+        sent += s
+        rejected += rj
+        errors.extend(errs)
+    if _SB["down"]:
+        outage = True
+    summary = (f"poslanih {sent}"
+               + (f", {rejected} zavrnjenih ({'; '.join(errors[:2])})" if rejected else "")
+               + (f", izpad ({len(todo) - sent - rejected} neposlanih)" if outage else "")
+               + f", {unchanged} nespremenjenih, {skipped_old} starejših od {SB_PUSH_MAX_AGE_DAYS} dni"
+               + (", polna sinhronizacija" if resync else ""))
+    return summary, not outage
+
+
+def _push_chunk(conn, chunk):
+    """Upsert one chunk of (payload, hash). A chunk PostgREST rejects outright
+    (4xx: one malformed row poisons the whole INSERT) is bisected so only the
+    offending row is lost; an outage trips the breaker and stops. Returns
+    (sent, rejected, errors)."""
+    payload = [p for p, _h in chunk]
+    if not _SB["has_cluster"]:
+        for p in payload:
+            p.pop("cluster", None)
+    ok, err = sb_call("incidents?on_conflict=id", "POST", payload,
+                      prefer="resolution=merge-duplicates,return=minimal", timeout=SB_TIMEOUT + 5)
+    if not ok and "cluster" in str(err) and _SB["has_cluster"]:
+        # The table predates the cluster column — send without it from now on.
+        _SB["has_cluster"] = False
+        return _push_chunk(conn, chunk)
+    if ok:
+        with conn:
+            conn.executemany("UPDATE incidents SET hash=? WHERE id=?", [(h, p["id"]) for p, h in chunk])
+        return len(chunk), 0, []
+    if _SB["down"] or err == "down":
+        return 0, 0, []
+    if len(chunk) == 1:
+        return 0, 1, [f"{chunk[0][0]['id']}: {str(err)[:120]}"]
+    half = len(chunk) // 2
+    a = _push_chunk(conn, chunk[:half])
+    b = _push_chunk(conn, chunk[half:])
+    return a[0] + b[0], a[1] + b[1], a[2] + b[2]
+
+
+# Sources whose rows the console treats as a rolling 3-day dispatch log. Only
+# these are pruned early; police and after-action report rows live 7 days.
+AT_DISPATCH_SOURCES = ("NÖ Feuerwehr · Wastl", "OÖ Feuerwehr · LFV")
 
 
 def prune_supabase_austria(days=MAX_AGE_DAYS):
@@ -390,34 +663,53 @@ def prune_supabase_austria(days=MAX_AGE_DAYS):
     rows older than `days`, not just hide them client-side. Croatia's archive
     stays forever by design (the README documents that intentionally); this
     is a deliberately different, narrower rule scoped to country=AT only.
-    Never raises — a failed prune must not stop polling."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
+
+    The 3-day rule applies to the two dispatch logs only. Police and report
+    rows are emitted with a 7-day window by their sources, so pruning them at
+    3 days would delete and re-insert them every cycle (and ring the console's
+    new-incident toast each time). Never raises."""
+    if not sb_configured():
         return "off"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(LOCAL)
     cutoff = (now - timedelta(days=days)).strftime("%Y-%m-%d")
     report_cutoff = (now - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
-    stale_live = (now - timedelta(minutes=40)).isoformat(timespec="seconds")
-    hdr = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Prefer": "return=minimal"}
+    stale_live = (datetime.now(timezone.utc) - timedelta(minutes=40)).isoformat(timespec="seconds")
+    quoted = ",".join('"' + s + '"' for s in AT_DISPATCH_SOURCES)
     results = []
-    for label, url in (
-        # Age-out: live dispatch rows past the retention window; the border
-        # belt's after-action reports get the longer window, they arrive late.
-        ("age", f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&region=in.(noe,ooe)&occurred=lt.{cutoff}"),
-        ("reports", f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&region=in.(stmk,ktn)&occurred=lt.{report_cutoff}"),
+    for label, path in (
+        # Age-out: the two live dispatch logs past the 3-day window …
+        ("dispatch", urllib.parse.quote(f"incidents?country=eq.AT&source=in.({quoted})&occurred=lt.{cutoff}",
+                                        safe="=&().,?")),
+        # … and every Austrian row (police, after-action reports) past 7 days.
+        ("reports", f"incidents?country=eq.AT&occurred=lt.{report_cutoff}"),
         # NÖ "running" rows are re-pushed (last_seen refreshed) every poll for
         # as long as the call is open; one not re-seen for 40 minutes has
         # closed and its exact-time history row has replaced it.
-        ("live", f"{SUPABASE_URL}/rest/v1/incidents?country=eq.AT&ref=like.NOE-LIVE*&last_seen=lt.{urllib.parse.quote(stale_live)}"),
+        ("live", f"incidents?country=eq.AT&ref=like.NOE-LIVE*&last_seen=lt.{urllib.parse.quote(stale_live)}"),
     ):
-        req = urllib.request.Request(url, method="DELETE", headers=hdr)
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                results.append(f"{label} {resp.status}")
-        except urllib.error.HTTPError as e:
-            results.append(f"{label} error HTTP {e.code} {e.read()[:200].decode('utf-8', 'replace')}")
-        except Exception as e:                                    # noqa: BLE001
-            results.append(f"{label} error {type(e).__name__}")
+        ok, err = sb_call(path, "DELETE", prefer="return=minimal")
+        results.append(f"{label} ok" if ok else f"{label} napaka {str(err)[:80]}")
+        if not ok and err == "down":
+            break
     return "pruned (" + ", ".join(results) + ")"
+
+
+def push_source_status(statuses):
+    """One row per source in public.source_status (source, ok, rows, ms, error,
+    checked_at). The table is optional: a 404 (not created yet) is ignored."""
+    if not sb_configured() or not statuses:
+        return "off"
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    payload = [{"source": name, "ok": st in ("ok", "unchanged"), "rows": int(n), "ms": int(ms),
+                "error": None if st in ("ok", "unchanged") else str(st)[:200], "checked_at": now}
+               for name, st, n, ms in statuses]
+    ok, err = sb_call("source_status?on_conflict=source", "POST", payload,
+                      prefer="resolution=merge-duplicates,return=minimal")
+    if ok:
+        return f"{len(payload)} virov"
+    if str(err).startswith("HTTP 404"):
+        return "tabela source_status ne obstaja"
+    return f"napaka {str(err)[:80]}"
 
 # --------------------------------------------------------------------------
 # Gazetteer. No geocoding service — a static table keeps the app offline-safe.
@@ -571,18 +863,60 @@ POLICE_PUS = [
 ]
 # Headlines that are police PR rather than an incident. Dropped before fetching.
 POLICE_SKIP = ("preventiv", "educira", "akcija", "nadzor", "obavijest", "natječaj", "dan otvorenih",
-               "tjedna analiza", "sažetak", "pregled događaja", "uhićen", "provala", "otuđ", "krađ",
-               "prijevar", "droga", "kazneno djelo", "remeti", "glazb", "alkohol")
+               "tjedna analiza", "sažetak", "pregled događaja", "uhićen", "provala", "provaljen",
+               "otuđ", "krađ", "prijevar", "droga", "kazneno djelo", "remeti", "glazb", "alkohol",
+               "najava", "pomorsk")
 # Crime that is not an emergency call-out. Used to filter media crime sections.
-CRIME_SKIP = ("provala", "krađ", "otuđ", "droga", "uhićen", "prijevar", "nasilj", "prijetnj",
-              "tučnjav", "remeti", "prekršaj", "kazneno djelo", "razbojni", "pretres",
-              # Administrative/enforcement stories that share vocabulary with real
-              # interventions but aren't one: a roadworthiness order, a court fine,
-              # a licence suspension — police-blotter admin, not a dispatched call.
-              "izvanredni tehnički", "oduzeo vozačku", "trajno oduzet", "zabranom vožnje",
-              "zabranom upravljanja", "novčano kažnjen", "novčanom kaznom",
-              "neisprav", "isključili iz prometa", "isključio iz prometa",
-              "isključen iz prometa", "isključili iz promet")
+CRIME_SKIP = ("provala", "provaljen", "krađ", "otuđ", "droga", "uhićen", "prijevar", "nasilj",
+              "prijetnj", "tučnjav", "remeti", "kazneno djelo", "razbojni", "pretres")
+# Administrative/enforcement stories that share vocabulary with real
+# interventions but aren't one: a roadworthiness order, a court fine, a licence
+# suspension — police-blotter admin, not a dispatched call. Headline-only: the
+# same words are routine inside the body of a real DUI crash report.
+ENFORCEMENT_SKIP = ("prekršaj", "izvanredni tehnički", "oduzeo vozačku", "trajno oduzet",
+                    "zabranom vožnje", "zabranom upravljanja", "novčano kažnjen", "novčanom kaznom",
+                    "neisprav", "isključili iz prometa", "isključio iz prometa",
+                    "isključen iz prometa", "isključili iz promet")
+
+
+def blotter_skip(title: str, body: str = "") -> bool:
+    """True for a crime/enforcement story that is not a call-out. Decided on the
+    headline: a headline that is itself a crash, fire or rescue is never dropped,
+    however much police phrasing the body carries ('vozač isključen iz prometa'
+    is in every DUI-crash report). Only when the headline names no incident at
+    all does the body's crime vocabulary get a say."""
+    tl = title.lower()
+    if categorise(title, title) in ("accident", "fire", "rescue"):
+        return False
+    if any(k in tl for k in CRIME_SKIP) or any(k in tl for k in ENFORCEMENT_SKIP):
+        return True
+    return _cat(tl) is None and any(k in body.lower() for k in CRIME_SKIP)
+
+
+def cut_title(s: str, limit: int = 110) -> str:
+    """Trim a headline at a word boundary with an ellipsis — never mid-word."""
+    s = tidy(s or "")
+    if len(s) <= limit:
+        return s
+    cut = s[:limit - 1]
+    if " " in cut[limit // 2:]:
+        cut = cut[:cut.rfind(" ")]
+    return cut.rstrip(" ,;:-–") + "…"
+
+
+_LOWER_WORDS = {"na", "u", "ob", "pri", "od", "do", "kod", "i", "an", "der", "am", "im", "bei",
+                "in", "ob", "an der", "pod", "nad", "za"}
+
+
+def place_case(name: str) -> str:
+    """Title-case a place name the way maps write it: 'Biograd na Moru',
+    'Sveti Martin na Muri', 'Neumarkt an der Raab' — connectives stay lower."""
+    words = (name or "").split()
+    out = []
+    for i, w in enumerate(words):
+        lw = w.lower()
+        out.append(lw if (i > 0 and lw in _LOWER_WORDS) else (w[:1].upper() + w[1:].lower()))
+    return " ".join(out)
 
 MONTHS_HR = {"siječnja": 1, "veljače": 2, "ožujka": 3, "travnja": 4, "svibnja": 5, "lipnja": 6,
              "srpnja": 7, "kolovoza": 8, "rujna": 9, "listopada": 10, "studenoga": 11,
@@ -611,6 +945,23 @@ CATEGORY_RULES = [
 
 ROUNDUP = ("vikend", "evidentiran", "tijekom protekl", "prometne nesreće i prekršaji",
            "tjedni pregled", "u proteklih", "u protekla")
+_TALLY_RE = re.compile(
+    r"(?:\b\d+|\bdvije|\btri|\bčetiri|\bpet|\bšest|\bsedam|\bosam|\bdevet|\bdeset)\s+"
+    r"(?:prometn|požar|intervencij|događaj|nesreć|osob)"
+    r"|tijekom\s+(?:protekl|vikend)|u\s+protekl|tjedni\s+pregled|pregled\s+događaja"
+    r"|prometne nesreće i prekršaji")
+
+
+def is_roundup(title: str) -> bool:
+    """A tally over a period ('Tijekom vikenda 12 prometnih nesreća'), not one
+    call. 'Evidentirana prometna nesreća s ozlijeđenom osobom' has a roundup
+    word but the shape of a single incident — it is not a summary."""
+    tl = title.lower()
+    if not any(k in tl for k in ROUNDUP):
+        return False
+    if re.search(r"\bnesreć[aiu]\s+s\b|\bnesreći\b", tl) and not re.search(r"\b\d+\s+prometn", tl):
+        return False
+    return bool(_TALLY_RE.search(tl))
 
 
 def _cat(low: str):
@@ -624,7 +975,7 @@ def categorise(text: str, title: str = "") -> str:
     """Headlines are cleaner than bodies. A body that says 'nobody was hurt' still
     contains the word for 'hurt', so the title decides whenever it can."""
     tl = title.lower()
-    if tl and any(k in tl for k in ROUNDUP):
+    if tl and is_roundup(title):
         return "summary"                         # a weekend tally, not one call
     return _cat(tl) or _cat(text.lower()) or "other"
 
@@ -707,8 +1058,10 @@ STREET_RE = re.compile(
     # "ulic(a/i/u/e)" itself, not on capitalisation of what follows.
     r"\b[Uu]lic\w*\s+([\wšđčćžA-ZŠĐČĆŽ][\wšđčćžA-ZŠĐČĆŽ.\- ]{2,40}?)(?=\s+u\s|[,.]|$)", re.U)
 NOMINATIM_UA = "VatroCAD/1.0 (personal dispatch dashboard; +https://github.com/Wolff8/vatrocad)"
-NOMINATIM_MAX_PER_CYCLE = 25     # bounds one poll's worst-case added wall time to ~30s
+NOMINATIM_MAX_PER_CYCLE = int(os.getenv("NOMINATIM_BUDGET", "25"))   # shared by HR streets + AT towns
 _nominatim_last_call = [0.0]
+_NOMINATIM_LOCK = threading.Lock()     # one request in flight, 1.1 s apart, whatever the thread
+_geo_budget = [NOMINATIM_MAX_PER_CYCLE]  # remaining lookups this cycle (reset in poll_once)
 
 
 def _nominatim_lookup(query: str, countrycodes: str = "hr"):
@@ -717,30 +1070,56 @@ def _nominatim_lookup(query: str, countrycodes: str = "hr"):
     Austrian callers pass "at" — without this, a Croatia-only filter silently
     empties every Austrian result rather than erroring, which is exactly what
     happened on first wiring this up: geocoding "succeeded" with None every
-    time, no error, no hint why."""
-    wait = _nominatim_last_call[0] + 1.1 - time.time()
-    if wait > 0:
-        time.sleep(wait)
-    _nominatim_last_call[0] = time.time()
-    url = (f"https://nominatim.openstreetmap.org/search?format=json&limit=1"
-           f"&countrycodes={countrycodes}&q=" + urllib.parse.quote(query))
-    req = urllib.request.Request(url, headers={"User-Agent": NOMINATIM_UA})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        if data:
-            return float(data[0]["lat"]), float(data[0]["lon"])
-    except Exception:                                             # noqa: BLE001
-        pass
-    return None
+    time, no error, no hint why. Debits the shared per-cycle budget; returns
+    None without calling once it is spent."""
+    with _NOMINATIM_LOCK:
+        if _geo_budget[0] <= 0:
+            return None
+        _geo_budget[0] -= 1
+        wait = _nominatim_last_call[0] + 1.1 - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _nominatim_last_call[0] = time.time()
+        url = (f"https://nominatim.openstreetmap.org/search?format=json&limit=1"
+               f"&countrycodes={countrycodes}&q=" + urllib.parse.quote(query))
+        req = urllib.request.Request(url, headers={"User-Agent": NOMINATIM_UA})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+            if data:
+                return float(data[0]["lat"]), float(data[0]["lon"])
+        except Exception:                                         # noqa: BLE001
+            return "error"
+        return None
+
+
+def _geo_cached(conn, key: str):
+    """(found, lat, lon): a hit, a fresh miss (found with None coordinates), or
+    not in the cache / a miss old enough to retry."""
+    row = conn.execute("SELECT lat, lon, tried_at FROM geocode_cache WHERE q=?", (key,)).fetchone()
+    if row is None:
+        return False, None, None
+    if row["lat"] is not None:
+        return True, row["lat"], row["lon"]
+    tried = row["tried_at"] or ""
+    fresh = tried >= (datetime.now(timezone.utc) - timedelta(hours=GEO_NEG_CACHE_HOURS)).isoformat(timespec="seconds")
+    return (True, None, None) if fresh else (False, None, None)
+
+
+def _geo_remember(conn, key: str, lat, lon):
+    """Cache a hit forever, a miss for GEO_NEG_CACHE_HOURS (a typo town was
+    otherwise re-queried every poll — against Nominatim's 'no repeated
+    identical queries' rule)."""
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO geocode_cache(q, lat, lon, tried_at) VALUES(?,?,?,?)",
+                     (key, lat, lon, datetime.now(timezone.utc).isoformat(timespec="seconds")))
 
 
 def refine_locations(conn, rows):
     """Sharpen a settlement-centroid fix to an actual street, for incidents
     whose text names one. Mutates lat/lon on `rows` in place."""
-    budget = NOMINATIM_MAX_PER_CYCLE
     for r in rows:
-        if budget <= 0:
+        if _geo_budget[0] <= 0:
             break
         if r.get("lat") is None or not r.get("location"):
             continue
@@ -752,21 +1131,13 @@ def refine_locations(conn, rows):
         if len(street) < 4:
             continue
         cache_key = f"{street}|{r['location']}"
-        row = conn.execute("SELECT lat, lon FROM geocode_cache WHERE q=?", (cache_key,)).fetchone()
-        if row is not None:
-            lat, lon = row["lat"], row["lon"]
-        else:
+        found, lat, lon = _geo_cached(conn, cache_key)
+        if not found:
             hit = _nominatim_lookup(f"{street}, {r['location']}, Hrvatska")
-            budget -= 1
+            if hit == "error":
+                continue                                   # transient: not a miss, retry next cycle
             lat, lon = hit if hit else (None, None)
-            # Only cache a real hit. A miss here is often just a transient
-            # network hiccup, not a genuinely unfindable street — caching it
-            # would silently stick that street at the settlement fallback
-            # forever instead of trying again next cycle.
-            if lat is not None:
-                with conn:
-                    conn.execute("INSERT OR IGNORE INTO geocode_cache(q, lat, lon) VALUES(?,?,?)",
-                                 (cache_key, lat, lon))
+            _geo_remember(conn, cache_key, lat, lon)
         if lat is None:
             continue
         # A street "hit" far from the settlement centroid is a bad match (a
@@ -777,49 +1148,167 @@ def refine_locations(conn, rows):
 
 # --------------------------------------------------------------------------
 # HTTP with conditional GET, so repeat polls cost the source almost nothing.
+# Sources are fetched concurrently (poll_once), but never two requests to the
+# same host at once — a per-host lock keeps every volunteer server at the
+# load of a single polite client. ETag/Last-Modified validators live in
+# SQLite so a conditional GET works on the first cycle of every job, too.
 # --------------------------------------------------------------------------
 _CACHE_VALIDATORS = {}
+_VALIDATORS_LOCK = threading.Lock()
+_HOST_LOCKS = {}
+_HOST_LOCKS_GUARD = threading.Lock()
+_CYCLE = {"resync": False}     # True on a job's first cycle: skip validators, re-read everything
+_thread_db = threading.local()
 
 
-def fetch(url: str, timeout: int = 30):
+def cache_db():
+    """A per-thread SQLite connection to the same file for the caches that the
+    concurrently running source fetchers touch (geocode, article, validators,
+    NÖ live starts). SQLite serialises the writes itself; the busy timeout
+    covers the brief contention."""
+    conn = getattr(_thread_db, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        _thread_db.conn = conn
+    return conn
+
+
+def _host_lock(url: str):
+    host = urllib.parse.urlsplit(url).hostname or url
+    with _HOST_LOCKS_GUARD:
+        lock = _HOST_LOCKS.get(host)
+        if lock is None:
+            lock = _HOST_LOCKS[host] = threading.Lock()
+    return lock
+
+
+def load_validators(conn):
+    with _VALIDATORS_LOCK:
+        for row in conn.execute("SELECT url, etag, modified FROM http_validators"):
+            _CACHE_VALIDATORS[row["url"]] = {"etag": row["etag"], "modified": row["modified"]}
+
+
+def _save_validator(url: str, etag, modified):
+    with _VALIDATORS_LOCK:
+        old = _CACHE_VALIDATORS.get(url)
+        _CACHE_VALIDATORS[url] = {"etag": etag, "modified": modified}
+        if old == _CACHE_VALIDATORS[url]:
+            return
+    try:
+        conn = cache_db()
+        with conn:
+            if etag or modified:
+                conn.execute("INSERT OR REPLACE INTO http_validators(url, etag, modified, saved_at) VALUES(?,?,?,?)",
+                             (url, etag, modified, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            else:
+                conn.execute("DELETE FROM http_validators WHERE url=?", (url,))
+    except sqlite3.Error:
+        pass
+
+
+def fetch(url: str, timeout: int = FETCH_TIMEOUT, conditional: bool = True):
     """Return (text, status). status is 'ok', 'unchanged', or 'error: ...'."""
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8",
         "Accept-Language": "hr,en;q=0.8",
     })
-    val = _CACHE_VALIDATORS.get(url, {})
-    if val.get("etag"):
-        req.add_header("If-None-Match", val["etag"])
-    if val.get("modified"):
-        req.add_header("If-Modified-Since", val["modified"])
+    if conditional and not _CYCLE["resync"]:
+        with _VALIDATORS_LOCK:
+            val = dict(_CACHE_VALIDATORS.get(url, {}))
+        if val.get("etag"):
+            req.add_header("If-None-Match", val["etag"])
+        if val.get("modified"):
+            req.add_header("If-Modified-Since", val["modified"])
     # One retry on a *network* failure (reset tunnel, DNS blip, timeout): these
-    # are transient and were costing a source a whole 15-minute cycle. HTTP
-    # errors are answered by the server and are not retried.
-    for attempt in (1, 2):
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read()
-                _CACHE_VALIDATORS[url] = {
-                    "etag": resp.headers.get("ETag"),
-                    "modified": resp.headers.get("Last-Modified"),
-                }
-                charset = resp.headers.get_content_charset()
-                for enc in filter(None, (charset, "utf-8", "cp1250", "iso-8859-2")):
-                    try:
-                        return raw.decode(enc), "ok"
-                    except (UnicodeDecodeError, LookupError):
-                        continue
-                return raw.decode("utf-8", "replace"), "ok"
-        except urllib.error.HTTPError as e:
-            if e.code == 304:
-                return None, "unchanged"
-            return None, f"error: HTTP {e.code}"
-        except Exception as e:                                # noqa: BLE001
-            if attempt == 1:
-                time.sleep(2)
-                continue
-            return None, f"error: {type(e).__name__}"
+    # are transient and were costing a source a whole cycle. HTTP errors are
+    # answered by the server and are not retried.
+    with _host_lock(url):
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read()
+                    _save_validator(url, resp.headers.get("ETag"), resp.headers.get("Last-Modified"))
+                    charset = resp.headers.get_content_charset()
+                    for enc in filter(None, (charset, "utf-8", "cp1250", "iso-8859-2")):
+                        try:
+                            return raw.decode(enc), "ok"
+                        except (UnicodeDecodeError, LookupError):
+                            continue
+                    return raw.decode("utf-8", "replace"), "ok"
+            except urllib.error.HTTPError as e:
+                if e.code == 304:
+                    return None, "unchanged"
+                return None, f"error: HTTP {e.code}"
+            except Exception as e:                            # noqa: BLE001
+                if attempt == 1:
+                    time.sleep(2)
+                    continue
+                return None, f"error: {type(e).__name__}"
+
+
+_article_budget = {}           # budget_key -> uncached fetches this cycle (reset in poll_once)
+_ARTICLE_LOCK = threading.Lock()
+
+
+def fetch_article(url: str, reduce, budget_key: str = "", budget: int = 6):
+    """An article body, fetched once ever. `reduce(html) -> str|None` turns the
+    page into the text the caller keeps (None = page not usable, not cached).
+    Articles never change, so the reduced text is cached in SQLite for
+    ARTICLE_CACHE_DAYS; per `budget_key` at most `budget` uncached pages are
+    fetched per cycle so a cold cache cannot stall a poll. Returns the text or
+    None."""
+    conn = cache_db()
+    row = conn.execute("SELECT body FROM article_cache WHERE url=?", (url,)).fetchone()
+    if row is not None:
+        return row["body"]
+    with _ARTICLE_LOCK:
+        if _article_budget.get(budget_key, 0) >= budget:
+            return None
+        _article_budget[budget_key] = _article_budget.get(budget_key, 0) + 1
+    html, _st = fetch(url, conditional=False)
+    if not html:
+        return None
+    text = reduce(html)
+    if text is None:
+        return None
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO article_cache(url, fetched_at, body) VALUES(?,?,?)",
+                     (url, datetime.now(timezone.utc).isoformat(timespec="seconds"), text))
+    return text
+
+
+def evict_caches(conn, verbose: bool = True):
+    """Housekeeping once per cycle: expire article bodies, cap the table, drop
+    stale negative geocode entries, old validators and old NÖ live starts."""
+    now = datetime.now(timezone.utc)
+    msgs = []
+    with conn:
+        n = conn.execute("DELETE FROM article_cache WHERE fetched_at < ?",
+                         ((now - timedelta(days=ARTICLE_CACHE_DAYS)).isoformat(timespec="seconds"),)).rowcount
+        if n:
+            msgs.append(f"{n} člankov starejših od {ARTICLE_CACHE_DAYS} dni")
+        total = conn.execute("SELECT COUNT(*) FROM article_cache").fetchone()[0]
+        if total > ARTICLE_CACHE_MAX:
+            n = conn.execute("""DELETE FROM article_cache WHERE url IN (
+                                  SELECT url FROM article_cache ORDER BY fetched_at LIMIT ?)""",
+                             (total - ARTICLE_CACHE_MAX,)).rowcount
+            msgs.append(f"{n} najstarejših člankov (omejitev {ARTICLE_CACHE_MAX})")
+        n = conn.execute("DELETE FROM geocode_cache WHERE lat IS NULL AND (tried_at IS NULL OR tried_at < ?)",
+                         ((now - timedelta(hours=GEO_NEG_CACHE_HOURS)).isoformat(timespec="seconds"),)).rowcount
+        if n:
+            msgs.append(f"{n} zastarelih negativnih geokod")
+        n = conn.execute("DELETE FROM http_validators WHERE saved_at < ?",
+                         ((now - timedelta(days=30)).isoformat(timespec="seconds"),)).rowcount
+        if n:
+            msgs.append(f"{n} validatorjev")
+        n = conn.execute("DELETE FROM live_start WHERE seen_at < ?",
+                         ((now - timedelta(days=3)).isoformat(timespec="seconds"),)).rowcount
+        if n:
+            msgs.append(f"{n} NÖ live začetkov")
+    if msgs and verbose:
+        print("  cache: odstranjeno " + ", ".join(msgs))
 
 
 html_unescape = htmllib.unescape
@@ -894,11 +1383,17 @@ def _event_date(text: str, published: str) -> str:
     year = m.group(3) or published[:4]
     try:
         d = datetime(int(year), MONTHS_HR[m.group(2)], int(m.group(1)))
+        pub = datetime.strptime(published, "%Y-%m-%d")
     except ValueError:
         return published
-    # A date in the future relative to publication means the year rolled over.
-    if d.strftime("%Y-%m-%d") > published:
-        d = d.replace(year=d.year - 1)
+    if d > pub:
+        # Far ahead means the year rolled over ('28. prosinca' read in January).
+        # A few days ahead is an announcement or a deadline ('do 10. rujna') —
+        # the event is whatever was published, not a date a year back.
+        if (d - pub).days > 300:
+            d = d.replace(year=d.year - 1)
+        else:
+            return published
     return d.strftime("%Y-%m-%d")
 
 
@@ -913,61 +1408,76 @@ def src_police():
     costs about twenty listing requests plus a handful of articles.
     """
     out, worst = [], "ok"
-    cutoff = (datetime.now(CEST) - timedelta(days=LIVE_WINDOW_DAYS + 1)).strftime("%Y-%m-%d")
-    for slug, region, label, seat in POLICE_PUS:
-        base = f"https://{slug}-policija.gov.hr"
-        listing, status = fetch(f"{base}/vijesti/8")
-        if listing is None:
-            if status != "unchanged":
-                worst = status
-            continue
-        fetched = 0
-        for href, title_html, excerpt_html, dd, mm, yy in NEWS_ITEM.findall(listing):
-            title = tidy(strip_tags(title_html))
-            low = title.lower()
-            tcat = categorise(title, title)
-            # PR/enforcement headlines are dropped — unless the headline is itself
-            # a crash or a rescue ("s 2,31 promila skrivio nesreću", "akcija
-            # potrage"): the skip word is then incidental to a real call-out.
-            if any(k in low for k in POLICE_SKIP) and tcat not in ("accident", "fire", "rescue"):
-                continue
-            if tcat not in ("accident", "fire", "rescue", "summary"):
-                continue
-            published = f"{yy}-{mm}-{dd}"
-            if published < cutoff:
-                continue
-            excerpt = tidy(strip_tags(excerpt_html))
-            body = excerpt
-            if fetched < 4:                                    # keep polls cheap
-                art, _ = fetch(base + href)
-                fetched += 1
-                if art:
-                    plain = tidy(strip_tags(re.sub(r"(?is)<(nav|header|footer)[^>]*>.*?</\1>", " ", art)))
-                    i = plain.find(title)
-                    body = plain[i + len(title): i + len(title) + 1400] if i >= 0 else plain[:1400]
-            date = _event_date(body, published)
-            tm = re.search(r"\boko\s+(\d{1,2})[:.,](\d{2})|\bu\s+(\d{1,2})[:.,](\d{2})\s*(?:sati|h\b)", body)
-            t = ""
-            if tm:
-                h, mnt = (tm.group(1), tm.group(2)) if tm.group(1) else (tm.group(3), tm.group(4))
-                t = f"{int(h):02d}:{mnt}"
-            units = sorted({tidy(u) for u in UNIT_RE.findall(body)})
-            ems = "Zavod za hitnu medicinu" in body or "hitne medicinske" in body.lower()
-            if ems:
-                units.append("ZHM")
-            lat, lon = geocode(title + " " + body)
-            if lat is None:
-                lat, lon = PLACES[seat]
-            out.append({
-                "id": f"pu:{slug}:{href.rsplit('/', 1)[-1]}",
-                "source": label, "region": region, "ref": f"PU-{href.rsplit('/', 1)[-1]}",
-                "date": date, "time": t, "category": categorise(body, title),
-                "title": title[:110],
-                "location": place_label(title + " " + body) or seat.title(),
-                "lat": lat, "lon": lon, "units": ", ".join(units) or label,
-                "crew": None, "vehicles": None, "raw": body[:1600], "link": base + href,
-            })
+    for pu in POLICE_PUS:
+        rows, status = src_police_one(*pu)
+        out.extend(rows)
+        if status not in ("ok", "unchanged"):
+            worst = status
     return out, worst
+
+
+def _gov_article_text(html: str):
+    plain = tidy(strip_tags(re.sub(r"(?is)<(script|style|nav|header|footer)[^>]*>.*?</\1>", " ", html)))
+    return plain or None
+
+
+def src_police_one(slug: str, region: str, label: str, seat: str):
+    """One county police administration. Article bodies come from the article
+    cache (fetched once ever), so a cycle costs one listing request plus the
+    handful of articles that are genuinely new."""
+    out = []
+    base = f"https://{slug}-policija.gov.hr"
+    cutoff = (datetime.now(LOCAL) - timedelta(days=LIVE_WINDOW_DAYS + 1)).strftime("%Y-%m-%d")
+    listing, status = fetch(f"{base}/vijesti/8")
+    if listing is None:
+        return out, status
+    for href, title_html, excerpt_html, dd, mm, yy in NEWS_ITEM.findall(listing):
+        title = tidy(strip_tags(title_html))
+        low = title.lower()
+        tcat = categorise(title, title)
+        # PR/enforcement headlines are dropped — unless the headline is itself
+        # a crash or a rescue ("s 2,31 promila skrivio nesreću", "akcija
+        # potrage"): the skip word is then incidental to a real call-out.
+        if any(k in low for k in POLICE_SKIP) and tcat not in ("accident", "fire", "rescue"):
+            continue
+        if tcat not in ("accident", "fire", "rescue", "summary"):
+            continue
+        # A summary row must be a tally of incidents, not any headline that
+        # happens to say 'weekend' — otherwise PR pieces leak in as summaries.
+        if tcat == "summary" and not re.search(r"prometn|požar", low):
+            continue
+        published = f"{yy}-{mm}-{dd}"
+        if published < cutoff:
+            continue
+        excerpt = tidy(strip_tags(excerpt_html))
+        body = excerpt
+        plain = fetch_article(base + href, _gov_article_text, budget_key=slug, budget=6)
+        if plain:
+            i = plain.find(title)
+            body = plain[i + len(title): i + len(title) + 1400] if i >= 0 else plain[:1400]
+        date = _event_date(body, published)
+        tm = re.search(r"\boko\s+(\d{1,2})[:.,](\d{2})|\bu\s+(\d{1,2})[:.,](\d{2})\s*(?:sati|h\b)", body)
+        t = ""
+        if tm:
+            h, mnt = (tm.group(1), tm.group(2)) if tm.group(1) else (tm.group(3), tm.group(4))
+            t = f"{int(h):02d}:{mnt}"
+        units = sorted({tidy(u) for u in UNIT_RE.findall(body)})
+        ems = "Zavod za hitnu medicinu" in body or "hitne medicinske" in body.lower()
+        if ems:
+            units.append("ZHM")
+        lat, lon = geocode(title + " " + body)
+        if lat is None:
+            lat, lon = PLACES[seat]
+        out.append({
+            "id": f"pu:{slug}:{href.rsplit('/', 1)[-1]}",
+            "source": label, "region": region, "ref": f"PU-{href.rsplit('/', 1)[-1]}",
+            "date": date, "time": t, "category": categorise(body, title),
+            "title": cut_title(title),
+            "location": place_label(title + " " + body) or place_case(seat),
+            "lat": lat, "lon": lon, "units": ", ".join(units) or label,
+            "crew": None, "vehicles": None, "raw": body[:1600], "link": base + href,
+        })
+    return out, status
 
 
 def src_mup_national():
@@ -980,10 +1490,10 @@ def src_mup_national():
     for href, title_html, _x, dd, mm, yy in NEWS_ITEM.findall(listing)[:20]:
         if "prometnih nesre" not in strip_tags(title_html).lower():
             continue
-        art, _ = fetch("https://policija.gov.hr" + href)
-        if not art:
+        plain = fetch_article("https://policija.gov.hr" + href, lambda h: tidy(strip_tags(h)) or None,
+                              budget_key="mup", budget=4)
+        if not plain:
             continue
-        plain = tidy(strip_tags(art))
         # Two phrasings: a multi-day window "od 4.9.2026. u 00,00 sati do 6.9.2026."
         # and a single day "dana 3.9.2026. od 00,00 do 24,00".
         per = re.search(r"od\s+(\d{1,2}\.\d{1,2}\.\d{4})\.?\s+u.{0,20}?do\s+(\d{1,2}\.\d{1,2}\.\d{4})", plain)
@@ -1015,11 +1525,11 @@ def src_mup_national():
         out.append({
             "id": f"mup:{href.rsplit('/', 1)[-1]}",
             "source": "MUP · nacionalno", "region": "nat", "ref": f"MUP-{href.rsplit('/', 1)[-1]}",
-            "date": f"{y}-{int(m):02d}-{int(d):02d}", "time": "24:00", "category": "summary",
+            "date": f"{y}-{int(m):02d}-{int(d):02d}", "time": "23:59", "category": "summary",
             "title": f"Prometne nesreće s nastradalima — {total.group(1)} u RH"
                      + (f", {per[0]}" + (f"–{per[1]}" if per[1] != per[0] else "") if per else ""),
             "location": "Republika Hrvatska", "lat": None, "lon": None,
-            "units": f"{killed if killed is not None else '?'} killed · {injured if injured is not None else '?'} injured",
+            "units": f"{killed if killed is not None else '?'} mrtvih · {injured if injured is not None else '?'} poškodovanih",
             "crew": int(total.group(1)), "vehicles": None,
             "raw": json.dumps({"accidents_with_casualties": int(total.group(1)), "serious": serious,
                                "killed": killed, "injured": injured,
@@ -1130,7 +1640,7 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
             title = tidy(strip_tags(it.findtext("title") or ""))
             body = tidy(strip_tags(it.findtext("description") or ""))
             blob = title + " " + body
-            if any(k in blob.lower() for k in CRIME_SKIP):
+            if blotter_skip(title, body):
                 continue
             cat = categorise(body, title)
             if cat not in ("fire", "accident", "tech", "ems", "rescue"):
@@ -1140,10 +1650,10 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
             # in its body slips in as a call.
             if region is None and _cat(title.lower()) is None:
                 continue
-            pub = it.findtext("pubDate") or ""
-            try:
-                dt = datetime.strptime(pub[5:25].strip(), "%d %b %Y %H:%M:%S")
-            except ValueError:
+            # pubDate carries its own offset (+0000 on 24sata/Večernji, +0200 on
+            # the WordPress portals) — parse it and convert to local wall clock.
+            dt = _parse_pubdate(it.findtext("pubDate") or "")
+            if dt is None:
                 continue
             date, t = dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
             # An hour named inside the story beats the publication hour — but a
@@ -1170,11 +1680,11 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
                 "id": f"{prefix}:{tidy(it.findtext('guid') or it.findtext('link') or title)[-40:]}",
                 "source": label, "region": region or region_for(lat, lon),
                 "ref": f"{prefix.upper()}-{dt:%m%d-%H%M}", "date": date, "time": t,
-                "category": cat, "title": title[:110],
-                "location": (lead.group(1).title() if lead and _match(lead.group(1)) else None)
-                            or place_label(blob) or (fallback_key.title() if fallback_key else "Hrvatska"),
+                "category": cat, "title": cut_title(title),
+                "location": (place_case(lead.group(1)) if lead and _match(lead.group(1)) else None)
+                            or place_label(blob) or (place_case(fallback_key) if fallback_key else "Hrvatska"),
                 "lat": lat, "lon": lon,
-                "units": ", ".join(sorted({tidy(u) for u in UNIT_RE.findall(blob)})) or "—",
+                "units": ", ".join(sorted({tidy(u) for u in UNIT_RE.findall(blob)})) or None,
                 "crew": None, "vehicles": None, "raw": body[:1600],
                 "link": tidy(it.findtext("link") or ""),
             })
@@ -1221,7 +1731,7 @@ def src_dvd_horvati():
             "source": "DVD Horvati", "region": "zag", "ref": f"ZG-{p['date'][:10]}",
             "date": p["date"][:10],
             "time": f"{int(tm.group(1)):02d}:{tm.group(2)}" if tm else "",
-            "category": categorise(title + " " + body), "title": title[:110],
+            "category": categorise(title + " " + body), "title": cut_title(title),
             "location": place_label(title + " " + body) or "Horvati, Zagreb",
             "lat": lat, "lon": lon, "units": "DVD Horvati",
             "crew": None, "vehicles": None,
@@ -1258,10 +1768,8 @@ def src_vz_medjimurje():
         if dm:
             date = f"{dm.group(3)}-{months[dm.group(2)]:02d}-{int(dm.group(1)):02d}"
         else:
-            try:
-                date = datetime.strptime(pub[5:16].strip(), "%d %b %Y").strftime("%Y-%m-%d")
-            except ValueError:
-                date = datetime.now(CEST).strftime("%Y-%m-%d")
+            pdt = _parse_pubdate(pub)                      # offset-aware, local wall clock
+            date = (pdt or datetime.now(LOCAL)).strftime("%Y-%m-%d")
         tm = re.search(r"\bu\s+(\d{1,2})[.:](\d{2})\s*(?:sat|h\b)", body)
         t = f"{int(tm.group(1)):02d}:{tm.group(2)}" if tm else ""
         # A county-wide tally ("54 intervencije u 31 sat") is a summary, not one call.
@@ -1276,7 +1784,7 @@ def src_vz_medjimurje():
             "ref": f"MŽ-{date[5:7]}{date[8:10]}",
             "date": date, "time": t,
             "category": "summary" if tally else categorise(title + " " + body),
-            "title": title[:110], "location": place_label(title + " " + body) or "Međimurje",
+            "title": cut_title(title), "location": place_label(title + " " + body) or "Međimurje",
             "lat": lat, "lon": lon, "units": ", ".join(units) or "VZ Međimurske županije",
             "crew": int(tally.group(1)) if tally else None, "vehicles": None,
             "raw": body[:1600], "link": tidy(it.findtext("link") or ""),
@@ -1310,15 +1818,13 @@ def src_sibenik_in():
             continue
         seen.add(url)
         arts.append((url, tidy(html_unescape(title))))
-    cutoff = (datetime.now(CEST) - timedelta(days=MAX_AGE_DAYS)).strftime("%Y-%m-%d")
-    for url, title in arts[:10]:                       # newest first; keep polls cheap
-        if any(k in title.lower() for k in CRIME_SKIP):
+    cutoff = (datetime.now(LOCAL) - timedelta(days=MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    for url, title in arts[:12]:                       # newest first; cached after the first read
+        if blotter_skip(title):
             continue
-        art, _ = fetch(url)
-        if not art:
+        plain = fetch_article(url, _gov_article_text, budget_key="sibenik.in", budget=6)
+        if not plain:
             continue
-        plain = tidy(strip_tags(re.sub(r"(?is)<(script|style|nav|header|footer)[^>]*>.*?</\1>",
-                                       " ", art)))
         stamp = re.search(r"(\d{2})\.(\d{2})\.(\d{4})\s*@\s*(\d{1,2}):(\d{2})", plain)
         if not stamp:
             continue                                   # undatable → not stored
@@ -1329,7 +1835,7 @@ def src_sibenik_in():
         i = plain.find(title)
         body = plain[i + len(title): i + len(title) + 1200] if i >= 0 else plain[:1200]
         blob = title + " " + body
-        if any(k in blob.lower() for k in CRIME_SKIP):
+        if blotter_skip(title, body):
             continue
         cat = categorise(body, title)
         if cat not in ("fire", "accident", "tech", "ems", "summary"):
@@ -1347,9 +1853,9 @@ def src_sibenik_in():
             "id": f"sibin:{url.rstrip('/').rsplit('/', 1)[-1][:44]}",
             "source": "sibenik.in · kronika", "region": "sib",
             "ref": f"SI-{dd}{mm}-{hh}{mi}", "date": date, "time": t, "category": cat,
-            "title": title[:110], "location": place_label(blob) or "Šibenik-Knin",
+            "title": cut_title(title), "location": place_label(blob) or "Šibenik-Knin",
             "lat": lat, "lon": lon,
-            "units": ", ".join(sorted({tidy(u) for u in UNIT_RE.findall(blob)})) or "—",
+            "units": ", ".join(sorted({tidy(u) for u in UNIT_RE.findall(blob)})) or None,
             "crew": None, "vehicles": None, "raw": body[:1600], "link": url,
         })
     return out, status
@@ -1475,16 +1981,15 @@ def src_dvoc_national():
     links = sorted({m for m in re.findall(r"/vijesti/dvoc-[a-z0-9-]+/(\d+)", listing)},
                    key=int, reverse=True)[:3]
     for art_id in links:
-        text, st = fetch(f"https://hvz.gov.hr/vijesti/dvoc-x/{art_id}")
-        if text is None:
-            # slug matters to the CMS; fall back to finding the full path
-            m = re.search(rf"/vijesti/(dvoc-[a-z0-9-]+)/{art_id}", listing)
-            if not m:
-                continue
-            text, st = fetch(f"https://hvz.gov.hr/vijesti/{m.group(1)}/{art_id}")
-            if text is None:
-                continue
-        plain = tidy(strip_tags(text))
+        m = re.search(rf"/vijesti/(dvoc-[a-z0-9-]+)/{art_id}", listing)
+        slug = m.group(1) if m else "dvoc-x"
+        plain = fetch_article(f"https://hvz.gov.hr/vijesti/{slug}/{art_id}",
+                              lambda h: tidy(strip_tags(h)) or None, budget_key="dvoc", budget=3)
+        if plain is None and slug != "dvoc-x":
+            plain = fetch_article(f"https://hvz.gov.hr/vijesti/dvoc-x/{art_id}",
+                                  lambda h: tidy(strip_tags(h)) or None, budget_key="dvoc", budget=3)
+        if not plain:
+            continue
         nums = re.search(
             r"zabilježen[ao]?\s+(?:je\s+)?([\d.]+)\s+vatrogasn\w*\s+intervencij\w*.{0,120}?"
             r"([\d.]+)\s+vatrogasnih\s+organizacij\w*.{0,60}?([\d.]+)\s+vatrogasca.{0,60}?"
@@ -1498,7 +2003,7 @@ def src_dvoc_national():
         # The report is for a 07:00–07:00 window ending on the second day of
         # "za dane 06. / 07. rujna 2026." — date the row to that day, not to when
         # we happened to fetch it, or the 3-day rule lies.
-        rep_date = datetime.now(CEST).strftime("%Y-%m-%d")
+        rep_date = datetime.now(LOCAL).strftime("%Y-%m-%d")
         pm = re.search(r"(\d{1,2})\.\s*/\s*(\d{1,2})\.\s*(" + "|".join(MONTHS_HR) + r")\s*(\d{4})",
                        per.group(1) if per else "")
         if pm:
@@ -1512,10 +2017,10 @@ def src_dvoc_national():
             "source": "HVZ · DVOC 193", "region": "nat", "ref": f"DVOC-{art_id}",
             "date": rep_date, "time": "07:00",
             "category": "summary",
-            "title": f"National nightly digest — {i2(nums.group(1))} interventions",
+            "title": f"Nočni pregled HVZ — {i2(nums.group(1))} intervencij",
             "location": per.group(1) if per else "Republika Hrvatska",
             "lat": None, "lon": None,
-            "units": f"{i2(nums.group(2))} organisations",
+            "units": f"{i2(nums.group(2))} organizacij",
             "crew": i2(nums.group(3)), "vehicles": i2(nums.group(4)),
             "raw": json.dumps({
                 "interventions": i2(nums.group(1)), "organisations": i2(nums.group(2)),
@@ -1551,10 +2056,19 @@ def src_meteoalarm():
             pass
         area = g("cap:areaDesc")
         lat, lon = geocode(area.replace(" region", ""))
+        # CAP onset is an offset-carrying stamp (usually UTC); convert to local
+        # wall clock before splitting, or a 13:00Z onset is stored as 13:00 local.
+        onset = g("cap:onset")
+        try:
+            on = datetime.fromisoformat(onset.replace("Z", "+00:00"))
+            on = on.astimezone(LOCAL) if on.tzinfo else on.replace(tzinfo=LOCAL)
+            o_date, o_time = on.strftime("%Y-%m-%d"), on.strftime("%H:%M")
+        except ValueError:
+            o_date, o_time = onset[:10], onset[11:16]
         out.append({
-            "id": f"meteo:{area}:{g('cap:event')}:{g('cap:onset')}",
+            "id": f"meteo:{area}:{g('cap:event')}:{onset}",
             "source": "Meteoalarm", "region": "nat", "ref": f"WX-{i+1}",
-            "date": (g("cap:onset") or "")[:10], "time": (g("cap:onset") or "")[11:16],
+            "date": o_date, "time": o_time,
             "category": "weather", "title": g("cap:event"),
             "location": area, "lat": lat, "lon": lon,
             "units": g("cap:severity"), "crew": None, "vehicles": None,
@@ -1605,10 +2119,8 @@ def src_hgss():
         if not re.search(r"spaša|spasi|potra[gž]|nestal|unesreć|ozlijeđ|evakuacij|"
                          r"pronaš|akcij|nesreć|utopi", (title + " " + body).lower()):
             continue
-        pub = it.findtext("pubDate") or ""
-        try:
-            dt = datetime.strptime(pub[5:25].strip(), "%d %b %Y %H:%M:%S")
-        except ValueError:
+        dt = _parse_pubdate(it.findtext("pubDate") or "")     # HGSS emits +0000
+        if dt is None:
             continue
         station = ""
         for c in it.findall("category"):
@@ -1619,14 +2131,14 @@ def src_hgss():
         lat, lon = geocode(title + " " + body)
         if lat is None and station in HGSS_STATIONS:
             lat, lon = PLACES.get(HGSS_STATIONS[station], (None, None))
-        loc = place_label(title + " " + body) or (station.title() if station else "Republika Hrvatska")
+        loc = place_label(title + " " + body) or (place_case(station) if station else "Republika Hrvatska")
         out.append({
             "id": f"hgss:{tidy(it.findtext('guid') or it.findtext('link') or title)[-40:]}",
             "source": "HGSS · spašavanje", "region": "nat",
             "ref": f"HGSS-{dt:%m%d}", "date": dt.strftime("%Y-%m-%d"), "time": dt.strftime("%H:%M"),
-            "category": "rescue", "title": title[:110], "location": loc,
+            "category": "rescue", "title": cut_title(title), "location": loc,
             "lat": lat, "lon": lon,
-            "units": f"HGSS {('Stanica ' + station.title()) if station else ''}".strip(),
+            "units": f"HGSS {('Stanica ' + place_case(station)) if station else ''}".strip(),
             "crew": None, "vehicles": None, "raw": body[:1600],
             "link": tidy(it.findtext("link") or ""),
         })
@@ -1653,7 +2165,7 @@ def src_hac():
     # Each motorway stretch is its own "<h4>name</h4> ... events ..." section;
     # split on the header so every event is attributed to the right stretch.
     parts = re.split(r'<h4 class="text-xl">([^<]+)</h4>', text)
-    cutoff = (datetime.now(CEST) - timedelta(days=MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    cutoff = (datetime.now(LOCAL) - timedelta(days=MAX_AGE_DAYS)).strftime("%Y-%m-%d")
     for i in range(1, len(parts) - 1, 2):
         stretch, section = tidy(parts[i]), parts[i + 1]
         for m in re.finditer(
@@ -1674,7 +2186,7 @@ def src_hac():
                 "id": rowid("HAC", date, f"{hh}:{mm}", stretch + desc),
                 "source": "HAC · autoceste", "region": "nat",
                 "ref": f"HAC-{mo}{dd}-{hh}{mm}", "date": date, "time": f"{hh}:{mm}",
-                "category": "tech", "title": f"{stretch}: {desc}"[:110],
+                "category": "tech", "title": cut_title(f"{stretch}: {desc}"),
                 "location": place_label(desc) or stretch, "lat": lat, "lon": lon,
                 "units": "HAC", "crew": None, "vehicles": None,
                 "raw": desc[:1600],
@@ -1781,6 +2293,8 @@ AT_SL_GLOSSARY = [
     ("Brandmeldealarm", "alarm požarnega javljalnika"),
     ("Brandmeldetaste Gedrückt", "pritisnjen ročni javljalnik požara"),
     ("Brandverdacht", "sum požara"),
+    ("Brandgeruch", "vonj po zažganem"),
+    ("Brandnachschau", "naknadni pregled požarišča"),
     ("Eingeschlossene Person in Lift", "oseba ujeta v dvigalu"),
     ("Entlaufenes Tier", "pobegla žival"),
     ("Freimachen von Verkehrswegen", "sprostitev prometnih poti"),
@@ -1874,9 +2388,6 @@ def _at_category(type_text: str) -> str:
     return "other"
 
 
-_at_geocode_conn = None    # lazily-opened connection, reused for the process's life
-
-
 def _at_geocode(town: str, state: str):
     """Reuse the Croatian-street-level Nominatim pipeline for Austrian towns —
     same rate limit, same persistent geocode_cache table (so a recurring town
@@ -1884,23 +2395,25 @@ def _at_geocode(town: str, state: str):
     towns dozens of times a day), just a different query string and country
     filter. Never geocoded against the Croatian PLACES gazetteer, which is
     HR-only."""
-    global _at_geocode_conn
-    if _at_geocode_conn is None:
-        _at_geocode_conn = db()
-    key = f"AT|{town}|{state}"
-    row = _at_geocode_conn.execute(
-        "SELECT lat, lon FROM geocode_cache WHERE q=?", (key,)).fetchone()
-    if row is not None:
-        return (row["lat"], row["lon"]) if row["lat"] is not None else (None, None)
+    conn = cache_db()
+    town = tidy(town or "")
+    if not town:
+        return (None, None)
+    key = f"AT|{town.lower()}|{state}"                # case-normalised: 'Bad schönau' is Bad Schönau
+    found, lat, lon = _geo_cached(conn, key)
+    if found:
+        return (lat, lon)
     hit = _nominatim_lookup(f"{town}, {state}, Österreich", countrycodes="at")
+    if hit is None:
+        # Second try without the state: a town on a state border, or one whose
+        # district name the page uses, often resolves country-wide.
+        hit = _nominatim_lookup(f"{town}, Österreich", countrycodes="at")
+    if hit == "error":
+        return (None, None)                           # transient: not cached, retried next cycle
     lat, lon = hit if hit else (None, None)
-    # Only cache a real hit — a miss is often a transient network blip, not a
-    # genuinely unfindable town, and caching it would strand that town
-    # unlocated forever instead of retrying on the next poll.
-    if lat is not None:
-        with _at_geocode_conn:
-            _at_geocode_conn.execute(
-                "INSERT OR IGNORE INTO geocode_cache(q, lat, lon) VALUES(?,?,?)", (key, lat, lon))
+    # A hit is cached for good; a miss for a day (negative cache), so a typo
+    # town is not queried on every poll.
+    _geo_remember(conn, key, lat, lon)
     return (lat, lon)
 
 
@@ -1953,7 +2466,7 @@ def src_at_noe():
     text, status = fetch(_WASTL + "Land_EinsatzHistorie.asp?bezirk=&vc")
     if text is None:
         return out, status
-    now = datetime.now(CEST)
+    now = datetime.now(LOCAL)
     cutoff = (now - timedelta(days=AT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
     for town, typ, dd, mo, yy, hh, mi, ss in re.findall(_WASTL_ROW, text):
         town, typ = tidy(town), tidy(typ)
@@ -1967,10 +2480,13 @@ def src_at_noe():
             "ref": f"NOE-{mo}{dd}-{hh}{mi}{ss}", "date": date, "time": f"{hh}:{mi}",
             "category": _at_category(typ), "title": at_translate(typ), "status": "closed",
             "location": town, "lat": lat, "lon": lon,
-            "units": "Feuerwehr " + town, "crew": None, "vehicles": None,
+            # The page names the alarm place, not the responding brigade — no
+            # invented "Feuerwehr <town>"; the console handles an empty unit.
+            "units": None, "crew": None, "vehicles": None,
             "raw": typ, "link": _WASTL + "ShowOverview.asp",
         })
     live, _ = fetch(_WASTL + "Land_EinsatzAktuell.asp?vc")
+    conn = cache_db()
     for town, typ, when in re.findall(
             r">Alarmzentrale</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td>",
             live or ""):
@@ -1978,17 +2494,39 @@ def src_at_noe():
         m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})\s*~\s*(\d+)\s*(std|min)", when, re.I)
         if not m:
             continue
+        # A fire watch at an event (B0 Brandsicherheitswache) runs for days and
+        # is a standby duty, not a running call — keep it off the live list.
+        if re.search(r"Brandsicherheitswache|^SOF0", typ, re.I):
+            continue
         dd, mo, yy, n, unit = m.groups()
-        started = now - timedelta(hours=int(n)) if unit.lower().startswith("std") else now - timedelta(minutes=int(n))
-        date = f"{yy}-{mo}-{dd}"
+        page_date = f"{yy}-{mo}-{dd}"
+        rid = rowid("AT-NOE-LIVE", page_date, "", town + typ)
+        # The page gives only "~ N std." — an estimate that drifts a minute per
+        # poll if recomputed. Persist the first estimate (rounded to the page's
+        # own precision) and keep it for the life of the call, and date it from
+        # the estimate too so a call that started before midnight is not stamped
+        # with today's date and tomorrow's-looking hour.
+        known = conn.execute("SELECT started FROM live_start WHERE id=?", (rid,)).fetchone()
+        if known is not None:
+            started = datetime.fromisoformat(known["started"])
+        else:
+            hours = unit.lower().startswith("std")
+            started = now - (timedelta(hours=int(n)) if hours else timedelta(minutes=int(n)))
+            started = (started.replace(minute=0, second=0, microsecond=0) if hours
+                       else started.replace(second=0, microsecond=0))
+            with conn:
+                conn.execute("INSERT OR REPLACE INTO live_start(id, started, seen_at) VALUES(?,?,?)",
+                             (rid, started.isoformat(timespec="minutes"),
+                              datetime.now(timezone.utc).isoformat(timespec="seconds")))
         lat, lon = _at_geocode(town, "Niederösterreich")
         out.append({
-            "id": rowid("AT-NOE-LIVE", date, "", town + typ),
+            "id": rid,
             "source": "NÖ Feuerwehr · Wastl", "region": "noe", "country": "AT",
-            "ref": f"NOE-LIVE-{mo}{dd}", "date": date, "time": started.strftime("%H:%M"),
+            "ref": f"NOE-LIVE-{mo}{dd}", "date": started.strftime("%Y-%m-%d"),
+            "time": started.strftime("%H:%M"),
             "category": _at_category(typ), "title": at_translate(typ), "status": "active",
             "location": town, "lat": lat, "lon": lon,
-            "units": "Feuerwehr " + town, "crew": None, "vehicles": None,
+            "units": None, "crew": None, "vehicles": None,
             "raw": f"{typ} (v teku ~{n} {'h' if unit.lower().startswith('std') else 'min'})",
             "link": _WASTL + "ShowOverview.asp",
         })
@@ -2016,7 +2554,7 @@ def src_at_ooe():
                               {"exercise": "Y", "bezirk": "-1"})
     if text is None:
         return out, status
-    now = datetime.now(CEST)
+    now = datetime.now(LOCAL)
     cutoff = (now - timedelta(days=AT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
     for colour, town, district, _abbr, typ, unit_block in _OOE_ROW.findall(text):
         town, typ = tidy(town), tidy(typ)
@@ -2161,12 +2699,24 @@ def _at_report_when(text: str, published: datetime):
 
 
 def _parse_pubdate(pub: str):
-    for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z"):
+    """RFC 822 pubDate → aware datetime in LOCAL. The offset in the feed is
+    honoured ('+0000' on 24sata/Večernji/HGSS, '+0200' on WordPress portals);
+    'GMT'/'UTC' names count as UTC; a stamp with no zone at all is taken as
+    local wall clock."""
+    pub = tidy(pub or "")
+    if not pub:
+        return None
+    if not re.match(r"^[A-Za-z]{3},", pub):
+        pub = "Mon, " + pub                                    # weekday missing: tolerate
+    for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z", "%a, %d %b %Y %H:%M:%S",
+                "%a, %d %b %Y %H:%M %z", "%a, %d %b %Y %H:%M"):
         try:
-            dt = datetime.strptime(pub.strip(), fmt)
-            return dt.astimezone(CEST) if dt.tzinfo else dt.replace(tzinfo=CEST)
+            dt = datetime.strptime(pub, fmt)
         except ValueError:
             continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc if pub.upper().endswith(("GMT", "UTC", " Z")) else LOCAL)
+        return dt.astimezone(LOCAL)
     return None
 
 
@@ -2182,7 +2732,7 @@ def make_at_feed(label, region, state, url, prefix, fallback):
             root = ET.fromstring(text)
         except ET.ParseError:
             return out, "error: bad XML"
-        cutoff = (datetime.now(CEST) - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+        cutoff = (datetime.now(LOCAL) - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
         ns = {"content": "http://purl.org/rss/1.0/modules/content/"}
         for it in root.findall(".//item"):
             title = tidy(strip_tags(it.findtext("title") or ""))
@@ -2215,7 +2765,7 @@ def make_at_feed(label, region, state, url, prefix, fallback):
                 "status": "closed",
                 "location": (town or label.split(" ·")[0].replace("BFKDO ", "").replace("BFK ", "").replace("FF ", "")) + f" ({state})",
                 "lat": lat, "lon": lon,
-                "units": ", ".join(units) or "—", "crew": None, "vehicles": len(units) or None,
+                "units": ", ".join(units) or None, "crew": None, "vehicles": len(units) or None,
                 "raw": body[:1600], "link": tidy(it.findtext("link") or ""),
             })
         return out, status
@@ -2268,7 +2818,7 @@ def make_at_police(code, label, region, state, fallback):
             root = ET.fromstring(text)
         except ET.ParseError:
             return out, "error: bad XML"
-        cutoff = (datetime.now(CEST) - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+        cutoff = (datetime.now(LOCAL) - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
         for it in root.findall(".//item"):
             title = tidy(strip_tags(it.findtext("title") or ""))
             body = tidy(strip_tags(it.findtext("description") or ""))
@@ -2340,12 +2890,16 @@ def src_at_stmk_lfv():
     text, status = fetch(_STMK_LFV + "Home/Aktuelles/Einsaetze-Berichte.aspx")
     if text is None:
         return out, status
-    global _at_geocode_conn
-    if _at_geocode_conn is None:
-        _at_geocode_conn = db()
-    now = datetime.now(CEST)
+    now = datetime.now(LOCAL)
     cutoff = (now - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
-    fetched = 0
+
+    def detail(html):
+        m = re.search(r'<div class="detailnews">(.*?)</div>', html, re.S)
+        if not m:
+            return None                                   # not the report page: do not cache
+        return tidy(strip_tags(re.sub(r"<h[12][^>]*>.*?</h[12]>|<p class=\"author\">.*?</p>", " ",
+                                      m.group(1), flags=re.S))) or None
+
     for dd, mo, yy, href, raw_title in _STMK_LIST_RE.findall(text):
         title = tidy(strip_tags(raw_title))
         date = f"{yy}-{mo}-{dd}"
@@ -2356,28 +2910,26 @@ def src_at_stmk_lfv():
             continue
         link = _STMK_LFV + href.lstrip("/")
         rid = rowid("AT-STMK", date, "", title)
-        known = _at_geocode_conn.execute("SELECT time, location, lat, lon, raw FROM incidents WHERE id=?", (rid,)).fetchone()
-        if known is not None:
-            time_, location, lat, lon, body = known["time"], known["location"], known["lat"], known["lon"], known["raw"]
-        else:
-            if fetched >= 10:
-                continue
-            fetched += 1
-            page, _ = fetch(link)
-            m = re.search(r'<div class="detailnews">(.*?)</div>', page or "", re.S)
-            body = tidy(strip_tags(re.sub(r"<h[12][^>]*>.*?</h[12]>|<p class=\"author\">.*?</p>", " ", m.group(1), flags=re.S))) if m else title
-            _d, time_ = _at_report_when(body, datetime(int(yy), int(mo), int(dd), 12, 0, tzinfo=CEST))
+        # The report page is read once ever (article cache); a failed or
+        # unusable fetch is not cached, so the row is completed on a later cycle
+        # instead of staying without alarm time and town for good.
+        body = fetch_article(link, detail, budget_key="stmk_lfv", budget=10)
+        if body:
+            _d, time_ = _at_report_when(body, datetime(int(yy), int(mo), int(dd), 12, 0, tzinfo=LOCAL))
             if not re.search(r"(?:um|gegen)\s+\d{1,2}[:.]\d{2}", body):
                 time_ = ""
             town = _at_report_town(title) or _at_report_town(body)
-            lat, lon = _at_geocode(town, "Steiermark") if town else (None, None)
-            location = f"{town} (Steiermark)" if town else "Steiermark"
+        else:
+            body, time_ = title, ""
+            town = _at_report_town(title)
+        lat, lon = _at_geocode(town, "Steiermark") if town else (None, None)
+        location = f"{town} (Steiermark)" if town else "Steiermark"
         out.append({
             "id": rid, "source": "LFV Štajerska · poročila", "region": "stmk", "country": "AT",
             "ref": f"STMK-LFV-{mo}{dd}", "date": date, "time": time_ or "",
             "category": cat, "title": title[:120], "status": "closed",
             "location": location, "lat": lat, "lon": lon,
-            "units": "—", "crew": None, "vehicles": None, "raw": (body or "")[:1600], "link": link,
+            "units": None, "crew": None, "vehicles": None, "raw": (body or "")[:1600], "link": link,
         })
     return out, status
 
@@ -2387,11 +2939,11 @@ def place_label(text: str):
     for m in LOC_PHRASE.finditer(scrubbed):
         hit = _match(m.group(1))
         if hit:
-            return hit[0].title()
+            return place_case(hit[0])
     low = scrubbed.lower()
     hits = [n for n in PLACES
             if re.search(r"(?<![\wšđčćž])" + re.escape(n) + r"(?![\wšđčćž])", low)]
-    return max(hits, key=len).title() if hits else None
+    return place_case(max(hits, key=len)) if hits else None
 
 
 # "dojava o požaru" is dative; the headline wants the nominative.
@@ -2459,28 +3011,37 @@ CREATE TABLE IF NOT EXISTS incidents(
   id TEXT PRIMARY KEY, source TEXT, region TEXT, ref TEXT, date TEXT, time TEXT,
   category TEXT, title TEXT, location TEXT, lat REAL, lon REAL, units TEXT,
   crew INTEGER, vehicles INTEGER, raw TEXT, link TEXT,
-  title_sl TEXT, raw_sl TEXT,
+  title_sl TEXT, raw_sl TEXT, country TEXT, status TEXT, cluster TEXT, hash TEXT,
   first_seen TEXT, last_seen TEXT);
 CREATE INDEX IF NOT EXISTS ix_inc_date ON incidents(date DESC, time DESC);
 CREATE TABLE IF NOT EXISTS sources(
   name TEXT PRIMARY KEY, method TEXT, status TEXT, count INTEGER, checked TEXT);
 CREATE TABLE IF NOT EXISTS geocode_cache(
-  q TEXT PRIMARY KEY, lat REAL, lon REAL);
+  q TEXT PRIMARY KEY, lat REAL, lon REAL, tried_at TEXT);
 CREATE TABLE IF NOT EXISTS translate_cache(
   k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS meta(
   k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS article_cache(
+  url TEXT PRIMARY KEY, fetched_at TEXT, body TEXT);
+CREATE TABLE IF NOT EXISTS http_validators(
+  url TEXT PRIMARY KEY, etag TEXT, modified TEXT, saved_at TEXT);
+CREATE TABLE IF NOT EXISTS live_start(
+  id TEXT PRIMARY KEY, started TEXT, seen_at TEXT);
 """
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
-    # A geocode-cache DB restored from an older run predates the SL columns.
-    for col in ("title_sl TEXT", "raw_sl TEXT"):
+    # A cache DB restored from an older run predates some columns.
+    for table, col in (("incidents", "title_sl TEXT"), ("incidents", "raw_sl TEXT"),
+                       ("incidents", "country TEXT"), ("incidents", "status TEXT"),
+                       ("incidents", "cluster TEXT"), ("incidents", "hash TEXT"),
+                       ("geocode_cache", "tried_at TEXT")):
         try:
-            conn.execute(f"ALTER TABLE incidents ADD COLUMN {col}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
     # One-shot: the first translation run stored glossary/original fallbacks in
@@ -2492,110 +3053,274 @@ def db():
             conn.execute("UPDATE incidents SET title_sl=NULL, raw_sl=NULL WHERE region IN ('stmk','ktn')")
             conn.execute("UPDATE incidents SET title_sl=NULL WHERE title_sl=title")
             conn.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('tsl_reset1','1')")
+    # One-shot: Austrian geocode keys are case-normalised now ('AT|town|state'
+    # with a lower-cased town); fold the old mixed-case entries in.
+    if not conn.execute("SELECT 1 FROM meta WHERE k='geo_lower1'").fetchone():
+        with conn:
+            for row in conn.execute("SELECT q, lat, lon FROM geocode_cache WHERE q LIKE 'AT|%'").fetchall():
+                parts = row["q"].split("|", 2)
+                if len(parts) == 3 and parts[1] != parts[1].lower():
+                    conn.execute("INSERT OR IGNORE INTO geocode_cache(q, lat, lon) VALUES(?,?,?)",
+                                 (f"AT|{parts[1].lower()}|{parts[2]}", row["lat"], row["lon"]))
+                    conn.execute("DELETE FROM geocode_cache WHERE q=?", (row["q"],))
+            conn.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('geo_lower1','1')")
     return conn
 
 
+_CONTENT_COLS = ("source", "region", "country", "ref", "date", "time", "category", "status",
+                 "title", "location", "lat", "lon", "units", "crew", "vehicles", "raw", "link",
+                 "title_sl", "raw_sl", "cluster")
+
+
 def store(conn, rows):
+    """Insert new rows; UPDATE the content of known ones when it changed (a
+    corrected date, a closed status, a sharper fix, a translation) so the local
+    DB is what gets pushed and what other parsers read back. Returns
+    (new, changed)."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    new = 0
+    new = changed = 0
+    sel = "SELECT " + ",".join(_CONTENT_COLS) + " FROM incidents WHERE id=?"
+    upd = ("UPDATE incidents SET " + ",".join(f"{c}=:{c}" for c in _CONTENT_COLS)
+           + ", last_seen=:now WHERE id=:id")
     with conn:
         for r in rows:
-            cur = conn.execute("SELECT 1 FROM incidents WHERE id=?", (r["id"],))
-            if cur.fetchone():
-                conn.execute("UPDATE incidents SET last_seen=? WHERE id=?", (now, r["id"]))
+            vals = {c: r.get(c) for c in _CONTENT_COLS}
+            vals["country"] = vals["country"] or "HR"
+            vals["status"] = vals["status"] or None
+            cur = conn.execute(sel, (r["id"],)).fetchone()
+            if cur is not None:
+                # A translation missing from this parse must not wipe a stored one.
+                for c in ("title_sl", "raw_sl"):
+                    if vals[c] is None:
+                        vals[c] = cur[c]
+                if any(vals[c] != cur[c] for c in _CONTENT_COLS):
+                    conn.execute(upd, {**vals, "now": now, "id": r["id"]})
+                    changed += 1
+                else:
+                    conn.execute("UPDATE incidents SET last_seen=? WHERE id=?", (now, r["id"]))
                 continue
             conn.execute(
-                """INSERT INTO incidents(id,source,region,ref,date,time,category,title,
-                   location,lat,lon,units,crew,vehicles,raw,link,title_sl,raw_sl,first_seen,last_seen)
-                   VALUES(:id,:source,:region,:ref,:date,:time,:category,:title,:location,
-                   :lat,:lon,:units,:crew,:vehicles,:raw,:link,:title_sl,:raw_sl,:fs,:fs)""",
-                {"title_sl": None, "raw_sl": None, **r, "fs": now})
+                "INSERT INTO incidents(id," + ",".join(_CONTENT_COLS) + ",first_seen,last_seen) VALUES(:id,"
+                + ",".join(f":{c}" for c in _CONTENT_COLS) + ",:fs,:fs)",
+                {**vals, "id": r["id"], "fs": now})
             new += 1
-    return new
+    return new, changed
 
 
-def poll_once(conn, verbose=True):
-    total_new = 0
-    all_rows = []
-    for name, fn, method in SOURCES:
-        t0 = time.time()
-        try:
-            rows, status = fn()
-        except Exception as e:                                # noqa: BLE001
-            rows, status = [], f"error: {type(e).__name__}"
-        refuted = defuture(rows) if rows else 0
-        new = store(conn, rows) if rows else 0
-        total_new += new
-        if rows:
-            all_rows.extend(rows)
-        # 'count' is what the database holds for this source, not what this one
-        # poll happened to return. A feed that answers 200 with an empty body for
-        # a moment must not zero out a source that has seven rows on disk.
-        stored = conn.execute("SELECT COUNT(*) FROM incidents WHERE source=?", (name,)).fetchone()[0]
-        with conn:
-            conn.execute(
-                """INSERT INTO sources(name,method,status,count,checked)
-                   VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET
-                   method=excluded.method,status=excluded.status,
-                   count=excluded.count,checked=excluded.checked""",
-                (name, method, status, stored,
-                 datetime.now(timezone.utc).isoformat(timespec="seconds")))
-        if verbose:
-            print(f"  {name:22s} {status:12s} {len(rows):3d} parsed, "
-                  f"{new:3d} new  ({time.time()-t0:.1f}s)"
-                  + (f"  [{refuted} redated]" if refuted else ""))
-    # The police source fans out over twenty administrations under one name; record
-    # each PU as its own source row so the dashboard can show per-county freshness.
+# Cadence tiers. FAST sources change minute to minute (dispatch logs, live
+# brigade logs, police wires, newsroom feeds) and run every cycle; SLOW ones
+# publish a few times a day and run every second cycle. A manual request and
+# the first cycle of a job always run everything. Labels must match SOURCES.
+SLOW_SOURCES = frozenset({
+    "Policija · 20 PU", "HAC · autoceste", "Meteoalarm", "HGSS · spašavanje",
+    "DVD Horvati", "VZ Međimurske ž.", "LFV Štajerska · poročila",
+    *[label for (label, *_rest) in AT_FEEDS],
+})
+
+
+def sources_for_cycle(full: bool):
+    """The (name, fn, method) entries to run this cycle."""
+    return [s for s in SOURCES if full or s[0] not in SLOW_SOURCES]
+
+
+def _run_task(fn):
+    t0 = time.time()
+    try:
+        rows, status = fn()
+    except Exception as e:                                        # noqa: BLE001
+        rows, status = [], f"error: {type(e).__name__}"
+    return rows, status, int((time.time() - t0) * 1000)
+
+
+def fetch_sources(full: bool = True):
+    """Fetch every source due this cycle, concurrently (MAX_WORKERS threads,
+    never two requests to one host at once — see fetch()). The twenty police
+    administrations are separate hosts, so they run as twenty tasks under
+    the one 'Policija · 20 PU' label. Returns an ordered list of
+    (name, rows, status, ms) plus the per-PU results."""
+    tasks = []                       # (group name, sub name, callable)
+    for name, fn, _method in sources_for_cycle(full):
+        if name == "Policija · 20 PU":
+            for pu in POLICE_PUS:
+                tasks.append((name, pu[2], (lambda p=pu: src_police_one(*p))))
+        else:
+            tasks.append((name, name, fn))
+    # Heaviest first so the long tail does not start last.
+    heavy = ("Policija · 20 PU", "NÖ Feuerwehr · Wastl", "OÖ Feuerwehr · LFV",
+             "LFV Štajerska · poročila", "sibenik.in · kronika")
+    tasks.sort(key=lambda t: (t[0] not in heavy, t[0]))
+    results = {}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futs = {ex.submit(_run_task, fn): (group, sub) for group, sub, fn in tasks}
+        for fut in futs:
+            group, sub = futs[fut]
+            results[(group, sub)] = fut.result()
+    out, pu_results = [], []
+    for name, _fn, _method in sources_for_cycle(full):
+        if name == "Policija · 20 PU":
+            rows, worst, ms = [], "ok", 0
+            for pu in POLICE_PUS:
+                r, st, t = results[(name, pu[2])]
+                rows.extend(r)
+                ms += t
+                pu_results.append((pu[2], r, st, t))
+                if st not in ("ok", "unchanged") and worst in ("ok", "unchanged"):
+                    worst = st
+                elif st == "unchanged" and worst == "ok" and not r:
+                    worst = "unchanged"
+            out.append((name, rows, worst, ms))
+        else:
+            rows, st, ms = results[(name, name)]
+            out.append((name, rows, st, ms))
+    return out, pu_results
+
+
+def assign_clusters(rows):
+    """Cross-source clustering key for HR rows: the same call reported by a
+    brigade log, the county centre, the police and a newsroom gets one
+    `cluster` so the console can fold the duplicates. Deliberately strict —
+    same day, same category, within ~2 km, within a 45-minute bucket, and only
+    when at least two *different* sources agree; if one source has two rows
+    in the same bucket (two distinct fires in one village), the bucket is
+    ambiguous and nobody in it is clustered."""
+    buckets = {}
+    for r in rows:
+        r["cluster"] = None
+        if r.get("country", "HR") != "HR" or r.get("lat") is None or not r.get("date"):
+            continue
+        if r.get("category") in ("summary", "weather", "other", "exercise"):
+            continue
+        t = r.get("time") or ""
+        if not re.match(r"^\d{2}:\d{2}$", t):
+            continue
+        minutes = int(t[:2]) * 60 + int(t[3:])
+        key = (r["date"], r["category"], round(r["lat"] / 0.02), round(r["lon"] / 0.03), minutes // 45)
+        buckets.setdefault(key, []).append(r)
+    n = 0
+    for key, members in buckets.items():
+        sources = [m["source"] for m in members]
+        if len(set(sources)) < 2 or len(sources) != len(set(sources)):
+            continue
+        ck = hashlib.md5("|".join(map(str, key)).encode()).hexdigest()[:12]
+        for m in members:
+            m["cluster"] = ck
+        n += len(members)
+    return n
+
+
+def _record_source(conn, name, method, status, ms):
+    # 'count' is what the database holds for this source, not what this one
+    # poll happened to return. A feed that answers 200 with an empty body for
+    # a moment must not zero out a source that has seven rows on disk.
+    stored = conn.execute("SELECT COUNT(*) FROM incidents WHERE source=?", (name,)).fetchone()[0]
     with conn:
-        for _slug, _region, label, _seat in POLICE_PUS:
-            n = conn.execute("SELECT COUNT(*) FROM incidents WHERE source=?", (label,)).fetchone()[0]
-            conn.execute(
-                """INSERT INTO sources(name,method,status,count,checked)
-                   VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET
-                   count=excluded.count,checked=excluded.checked""",
-                (label, "gov.hr CMS", "ok", n,
-                 datetime.now(timezone.utc).isoformat(timespec="seconds")))
+        conn.execute(
+            """INSERT INTO sources(name,method,status,count,checked)
+               VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET
+               method=excluded.method,status=excluded.status,
+               count=excluded.count,checked=excluded.checked""",
+            (name, method, f"{status} · {ms} ms", stored,
+             datetime.now(timezone.utc).isoformat(timespec="seconds")))
+
+
+def poll_once(conn, verbose=True, full=True, resync=False):
+    """One cycle: fetch (concurrently), date-guard, geocode-refine, translate,
+    store, delta-push, prune, report source health. Returns a dict with
+    `new`, `changed`, `push_ok`, `seconds`. Never raises on a source or on
+    Supabase; only a broken local DB can stop it."""
+    t_cycle = time.time()
+    _CYCLE["resync"] = resync
+    _geo_budget[0] = NOMINATIM_MAX_PER_CYCLE
+    _article_budget.clear()
+    load_validators(conn)
+    evict_caches(conn, verbose)
+    methods = {name: method for name, _fn, method in SOURCES}
+    phases = {}
+    t0 = time.time()
+    results, pu_results = fetch_sources(full)
+    phases["viri"] = time.time() - t0
+    total_new = total_changed = 0
+    all_rows, statuses, refuted = [], [], {}
+    for name, rows, status, ms in results:
+        if rows:
+            refuted[name] = defuture(rows)      # date guard first: everything below keys on the date
+            all_rows.extend(rows)
     # Sharpen settlement-centroid fixes to an actual street where the text
-    # names one, before pushing — see refine_locations() docstring.
+    # names one, before storing — see refine_locations() docstring.
+    t0 = time.time()
     try:
         refine_locations(conn, all_rows)
     except Exception as e:                                        # noqa: BLE001
         if verbose:
             print(f"  street refinement skipped: {type(e).__name__}: {e}")
+    phases["ulice"] = time.time() - t0
     # Translate titles/narratives into Slovenian (cache-first, budgeted), so the
-    # push below carries title_sl/raw_sl alongside the originals.
+    # stored row and the push carry title_sl/raw_sl alongside the originals.
+    t0 = time.time()
     try:
         mt = translate_rows(conn, all_rows)
-        if verbose:
-            print(f"  {'→ ' + mt:22s}")
     except Exception as e:                                        # noqa: BLE001
+        mt = f"preskočeno: {type(e).__name__}"
+    phases["prevod"] = time.time() - t0
+    clustered = assign_clusters(all_rows)
+    t0 = time.time()
+    for name, rows, status, ms in results:
+        new, changed = store(conn, rows) if rows else (0, 0)
+        total_new += new
+        total_changed += changed
+        _record_source(conn, name, methods.get(name, ""), status, ms)
+        statuses.append((name, status, len(rows), ms))
         if verbose:
-            print(f"  translation skipped: {type(e).__name__}: {e}")
-    # Mirror this cycle's full parse into Supabase (idempotent upsert) so a
-    # published, machine-independent dashboard can read it.
-    sb = push_supabase(all_rows)
+            rd = refuted.get(name, 0)
+            print(f"  {name:28s} {status[:28]:28s} {len(rows):3d} vrstic, {new:3d} novih, "
+                  f"{changed:3d} sprem.  {ms:6d} ms" + (f"  [{rd} predatiranih]" if rd else ""))
+    # The police source fans out over twenty administrations under one name; record
+    # each PU as its own source row so the dashboard can show per-county freshness.
+    for label, rows, status, ms in pu_results:
+        _record_source(conn, label, "gov.hr CMS", status, ms)
+        statuses.append((label, status, len(rows), ms))
+    phases["shranjevanje"] = time.time() - t0
+    if verbose:
+        print(f"  → {mt}; {clustered} vrstic v skupinah; Nominatim preostanek {_geo_budget[0]}")
+    # Mirror the changed part of this cycle's parse into Supabase.
+    t0 = time.time()
+    sb_reset_cycle()
+    sb, push_ok = push_supabase(conn, all_rows, resync=resync)
     if verbose and sb != "off":
-        print(f"  {'→ Supabase':22s} {sb}")
+        print(f"  {'→ Supabase':28s} {sb}")
     # Austria's retention rule is narrower than Croatia's: actually delete
-    # anything past AT_MAX_AGE_DAYS, every cycle, rather than keep a forever
+    # anything past its window, every cycle, rather than keep a forever
     # archive. Runs after the push so nothing is deleted before it lands.
-    pr = prune_supabase_austria()
-    if verbose and pr != "off":
-        print(f"  {'→ AT prune':22s} {pr}")
-    return total_new
+    if push_ok and sb != "off":
+        pr = prune_supabase_austria()
+        if verbose:
+            print(f"  {'→ AT prune':28s} {pr}")
+    st = push_source_status(statuses)
+    if verbose and st != "off":
+        print(f"  {'→ source_status':28s} {st}")
+    phases["supabase"] = time.time() - t0
+    seconds = time.time() - t_cycle
+    if verbose:
+        print(f"  cikel: {seconds:.1f} s ({', '.join(f'{k} {s:.1f} s' for k, s in phases.items())}), "
+              f"{len(all_rows)} vrstic, {total_new} novih, {total_changed} spremenjenih"
+              + ("" if push_ok else " — Supabase ne odgovarja"))
+    return {"new": total_new, "changed": total_changed, "push_ok": push_ok, "seconds": seconds,
+            "rows": len(all_rows)}
 
 
 def poller(conn, interval, stop):
     # main() has just polled everything; wait a full interval before the first
     # background cycle rather than hitting every source twice inside ten seconds.
     stop.wait(interval)
+    cycle = 1
     while not stop.is_set():
-        print(f"[{datetime.now(CEST):%H:%M:%S}] polling {len(SOURCES)} sources…")
+        print(f"[{datetime.now(LOCAL):%H:%M:%S}] polling {len(SOURCES)} sources…")
         try:
-            n = poll_once(conn)
-            print(f"[{datetime.now(CEST):%H:%M:%S}] {n} new incident(s) stored")
+            res = poll_once(conn, full=cycle % 2 == 0)
+            print(f"[{datetime.now(LOCAL):%H:%M:%S}] {res['new']} new incident(s) stored")
         except Exception as e:                                # noqa: BLE001
             print(f"  poll failed: {e}")
+        cycle += 1
         stop.wait(interval)
 
 
@@ -2624,7 +3349,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(b"dashboard.html missing", "text/plain", 500)
             return self._send(f.read_bytes(), "text/html; charset=utf-8")
         if path == "/api/incidents":
-            now = datetime.now(CEST)
+            now = datetime.now(LOCAL)
             since = (now - timedelta(days=MAX_AGE_DAYS)).strftime("%Y-%m-%d")
             # Nothing older than the max age leaves the server. The archive stays
             # in SQLite for anyone who wants it; the console is not an archive.
@@ -2655,8 +3380,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/favicon.ico":
             return self._send(b"", "image/x-icon", 204)
         if path == "/api/refresh":
-            n = poll_once(self.conn, verbose=False)
-            return self._send(json.dumps({"new": n}).encode(), "application/json")
+            res = poll_once(self.conn, verbose=False)
+            return self._send(json.dumps({"new": res["new"]}).encode(), "application/json")
         self._send(b"not found", "text/plain", 404)
 
 
@@ -2680,9 +3405,9 @@ def main():
         serve_loop(conn, args.serve_minutes, max(args.interval, 300))
         return
     print("Initial fetch…")
-    poll_once(conn)
+    res = poll_once(conn, full=True, resync=True)
     total = conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
-    print(f"Stored incidents: {total}")
+    print(f"Stored incidents: {total} ({res['seconds']:.1f} s cycle)")
     if args.once:
         return
 
