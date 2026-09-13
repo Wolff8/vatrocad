@@ -510,6 +510,8 @@ def serve_loop(conn, minutes: int, interval: int = 600, verbose: bool = True):
             if res.get("push_ok"):
                 control_write(poll_finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                               note=f"{n} novih")
+            elif res.get("error"):
+                control_write(note=f"napaka pobiralnika: {res['error'][:80]}")
             else:
                 # Never stamp a finish the data does not back: the dashboard's
                 # freshness comes from poll_finished_at.
@@ -583,6 +585,14 @@ def push_supabase(conn, rows, resync: bool = False):
     by_id = {}
     for r in rows:
         by_id[r["id"]] = r
+    # Rows that never made it over (stored or changed during an outage carry
+    # hash NULL) must go even when their source answered 304 this cycle and
+    # emitted nothing — otherwise they would wait for the next content change.
+    pending = 0
+    for row in conn.execute("SELECT * FROM incidents WHERE hash IS NULL AND date >= ?", (min_date,)):
+        if row["id"] not in by_id:
+            by_id[row["id"]] = dict(row)
+            pending += 1
     ids = list(by_id)
     stored = {}
     for i in range(0, len(ids), 400):
@@ -620,8 +630,10 @@ def push_supabase(conn, rows, resync: bool = False):
                + (f", {rejected} zavrnjenih ({'; '.join(errors[:2])})" if rejected else "")
                + (f", izpad ({len(todo) - sent - rejected} neposlanih)" if outage else "")
                + f", {unchanged} nespremenjenih, {skipped_old} starejših od {SB_PUSH_MAX_AGE_DAYS} dni"
-               + (", polna sinhronizacija" if resync else ""))
-    return summary, not outage
+               + (", polna sinhronizacija" if resync else "")
+               + (f", {pending} iz prejšnjega izpada" if pending else ""))
+    # Nothing written at all (every chunk refused) is not a good cycle either.
+    return summary, not outage and not (rejected and not sent)
 
 
 def _push_chunk(conn, chunk):
@@ -645,10 +657,15 @@ def _push_chunk(conn, chunk):
         return len(chunk), 0, []
     if _SB["down"] or err == "down":
         return 0, 0, []
-    if len(chunk) == 1:
-        return 0, 1, [f"{chunk[0][0]['id']}: {str(err)[:120]}"]
+    # A systemic refusal (expired key, RLS, missing table/column) fails every
+    # sub-chunk identically — bisecting it would cost 2n-1 requests per cycle.
+    systemic = re.search(r"HTTP (401|403|404)|PGRST204|PGRST301|PGRST30", str(err))
+    if len(chunk) == 1 or systemic:
+        return 0, len(chunk), [f"{chunk[0][0]['id']}: {str(err)[:120]}"]
     half = len(chunk) // 2
     a = _push_chunk(conn, chunk[:half])
+    if half >= 4 and a[0] == 0 and a[1] == half and a[2] and str(err)[:60] in a[2][0]:
+        return 0, len(chunk), a[2]          # the whole half failed the same way: don't split the rest
     b = _push_chunk(conn, chunk[half:])
     return a[0] + b[0], a[1] + b[1], a[2] + b[2]
 
@@ -984,7 +1001,10 @@ UNIT_RE = re.compile(r"\b(?:JVP|DVD|IVP|VZ\w*|HGSS)\s+[A-ZŠĐČĆŽ][\wšđčć
 # "na području Perkovića", "u gradskom predjelu Ražine", "u Ulici X" — the phrases
 # that actually name where the call was, as opposed to which unit answered it.
 LOC_PHRASE = re.compile(
-    r"(?:na\s+području|u\s+gradskom\s+predjelu|u\s+naselju|kod|između|u)\s+"
+    # "na Braču", "s Brača", "na otoku Hvaru": islands and uplands take na/s
+    # rather than u, so those count as location phrases too. "iz" does not —
+    # it usually says where a crew came from, not where the call is.
+    r"(?i:na\s+području|u\s+gradskom\s+predjelu|u\s+naselju|na\s+otoku|kod|između|u|na|sa?)\s+"
     r"([A-ZŠĐČĆŽ][\wšđčćž]+)", re.U)
 
 
@@ -1031,11 +1051,16 @@ def geocode(text: str):
     # Fallback: longest gazetteer name appearing as a whole word outside a unit
     # name. Whole-word matters — 'podi' is inside 'područje', which is in almost
     # every police report in the country.
-    low = scrubbed.lower()
+    # Capitalised as in prose: several gazetteer names are also common nouns
+    # ('rijeka' is a river, 'bol' is pain, 'luka' a harbour, 'zaton' a cove),
+    # and a headline about Brač was landing in Rijeka because its body said
+    # "rijeka" in the plain sense. Croatian capitalises place names, so the
+    # first letter must be upper case; the rest matches case-insensitively.
     best = None
     for name, coords in PLACES.items():
-        if re.search(r"(?<![\wšđčćž])" + re.escape(name) + r"(?![\wšđčćž])", low) and \
-                (best is None or len(name) > len(best[0])):
+        pat = (r"(?<![\wšđčćž])" + re.escape(name[0].upper()) + "(?i:" + re.escape(name[1:]) + ")"
+               + r"(?![\wšđčćž])")
+        if re.search(pat, scrubbed) and (best is None or len(name) > len(best[0])):
             best = (name, coords)
     return best[1] if best else (None, None)
 
@@ -1074,7 +1099,9 @@ def _nominatim_lookup(query: str, countrycodes: str = "hr"):
     None without calling once it is spent."""
     with _NOMINATIM_LOCK:
         if _geo_budget[0] <= 0:
-            return None
+            # Distinct from a miss: a spent budget must never be cached as
+            # "town not found" (that locked hundreds of towns out for a day).
+            return "budget"
         _geo_budget[0] -= 1
         wait = _nominatim_last_call[0] + 1.1 - time.time()
         if wait > 0:
@@ -1119,8 +1146,9 @@ def refine_locations(conn, rows):
     """Sharpen a settlement-centroid fix to an actual street, for incidents
     whose text names one. Mutates lat/lon on `rows` in place."""
     for r in rows:
-        if _geo_budget[0] <= 0:
-            break
+        # No early exit on a spent budget: a cached street fix must still be
+        # applied, or a row's coordinates would flip between cycles depending
+        # on how much budget the Austrian towns happened to leave.
         if r.get("lat") is None or not r.get("location"):
             continue
         blob = f"{r.get('title', '')} {r.get('raw', '')}"
@@ -1133,8 +1161,10 @@ def refine_locations(conn, rows):
         cache_key = f"{street}|{r['location']}"
         found, lat, lon = _geo_cached(conn, cache_key)
         if not found:
+            if _geo_budget[0] <= 0:
+                continue                                   # only the network lookup needs budget
             hit = _nominatim_lookup(f"{street}, {r['location']}, Hrvatska")
-            if hit == "error":
+            if hit in ("error", "budget"):
                 continue                                   # transient: not a miss, retry next cycle
             lat, lon = hit if hit else (None, None)
             _geo_remember(conn, cache_key, lat, lon)
@@ -1377,24 +1407,32 @@ NEWS_ITEM = re.compile(
 def _event_date(text: str, published: str) -> str:
     """Police write the event date in prose ('U petak, 4. rujna oko 3:20'). Prefer
     it over the publish date, which can trail the event by a day or two."""
-    m = re.search(r"(\d{1,2})\.\s*(" + "|".join(MONTHS_HR) + r")(?:\s*(\d{4}))?", text)
-    if not m:
-        return published
-    year = m.group(3) or published[:4]
     try:
-        d = datetime(int(year), MONTHS_HR[m.group(2)], int(m.group(1)))
         pub = datetime.strptime(published, "%Y-%m-%d")
     except ValueError:
         return published
-    if d > pub:
-        # Far ahead means the year rolled over ('28. prosinca' read in January).
-        # A few days ahead is an announcement or a deadline ('do 10. rujna') —
-        # the event is whatever was published, not a date a year back.
-        if (d - pub).days > 300:
-            d = d.replace(year=d.year - 1)
-        else:
-            return published
-    return d.strftime("%Y-%m-%d")
+    # Police prose often opens with a period ('Od 1. siječnja do danas…')
+    # before naming the call, so every date in the text is a candidate and the
+    # latest one within the last ten days wins; anything older is context, not
+    # the event.
+    best = None
+    for m in re.finditer(r"(\d{1,2})\.\s*(" + "|".join(MONTHS_HR) + r")(?:\s*(\d{4}))?", text):
+        year = m.group(3) or published[:4]
+        try:
+            d = datetime(int(year), MONTHS_HR[m.group(2)], int(m.group(1)))
+        except ValueError:
+            continue
+        if d > pub:
+            # Far ahead means the year rolled over ('28. prosinca' read in
+            # January). A few days ahead is an announcement or a deadline
+            # ('do 10. rujna') — not the event.
+            if (d - pub).days > 300:
+                d = d.replace(year=d.year - 1)
+            else:
+                continue
+        if (pub - d).days <= 10 and (best is None or d > best):
+            best = d
+    return best.strftime("%Y-%m-%d") if best else published
 
 
 def src_police():
@@ -1526,7 +1564,7 @@ def src_mup_national():
             "id": f"mup:{href.rsplit('/', 1)[-1]}",
             "source": "MUP · nacionalno", "region": "nat", "ref": f"MUP-{href.rsplit('/', 1)[-1]}",
             "date": f"{y}-{int(m):02d}-{int(d):02d}", "time": "23:59", "category": "summary",
-            "title": f"Prometne nesreće s nastradalima — {total.group(1)} u RH"
+            "title": f"Prometne nesreče s ponesrečenimi — {total.group(1)} v RH"
                      + (f", {per[0]}" + (f"–{per[1]}" if per[1] != per[0] else "") if per else ""),
             "location": "Republika Hrvatska", "lat": None, "lon": None,
             "units": f"{killed if killed is not None else '?'} mrtvih · {injured if injured is not None else '?'} poškodovanih",
@@ -1671,7 +1709,14 @@ def make_newsroom(label, region, url, fallback_key, prefix, caps_lead):
                     date = cand
             lead = re.match(r"^([A-ZŠĐČĆŽ][A-ZŠĐČĆŽ\s]{2,28}?)\s+[A-ZŠĐČĆŽ][a-zšđčćž]",
                             title) if caps_lead else None
-            lat, lon = geocode((lead.group(1) + " " if lead else "") + blob)
+            # The headline names where it happened; the body also names who
+            # coordinated from where ("MRCC Rijeka" for a fire on Brač), so the
+            # title is geocoded first and the body only when the title has no
+            # known place.
+            lead_txt = lead.group(1) + " " if lead else ""
+            lat, lon = geocode(lead_txt + title)
+            if lat is None:
+                lat, lon = geocode(lead_txt + blob)
             if lat is None:
                 if region is None:
                     continue                                   # national feed, no place named
@@ -2033,6 +2078,11 @@ def src_dvoc_national():
     return out, status
 
 
+# CAP severity/certainty words, so the stored weather row reads Slovenian.
+WX_SL = {"Minor": "manjša", "Moderate": "zmerna", "Severe": "huda", "Extreme": "izjemna",
+         "Likely": "verjetno", "Possible": "možno", "Observed": "opaženo", "Unlikely": "malo verjetno"}
+
+
 def src_meteoalarm():
     """Meteoalarm CAP feed — weather warnings as fire-risk context."""
     out = []
@@ -2050,9 +2100,12 @@ def src_meteoalarm():
         g = lambda p: (e.findtext(p, namespaces=ns) or "").strip()
         expires = g("cap:expires")
         try:
-            if expires and datetime.fromisoformat(expires) < now:
+            exp = datetime.fromisoformat(expires.replace("Z", "+00:00")) if expires else None
+            if exp is not None and exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp is not None and exp < now:
                 continue                                  # drop lapsed warnings
-        except ValueError:
+        except (ValueError, TypeError):
             pass
         area = g("cap:areaDesc")
         lat, lon = geocode(area.replace(" region", ""))
@@ -2071,8 +2124,9 @@ def src_meteoalarm():
             "date": o_date, "time": o_time,
             "category": "weather", "title": g("cap:event"),
             "location": area, "lat": lat, "lon": lon,
-            "units": g("cap:severity"), "crew": None, "vehicles": None,
-            "raw": f"{g('cap:severity')} · {g('cap:certainty')} · expires {expires}",
+            "units": WX_SL.get(g("cap:severity"), g("cap:severity")), "crew": None, "vehicles": None,
+            "raw": (f"{WX_SL.get(g('cap:severity'), g('cap:severity'))} · "
+                    f"{WX_SL.get(g('cap:certainty'), g('cap:certainty'))} · velja do {expires}"),
             "link": "https://meteoalarm.org",
         })
     return out, status
@@ -2408,7 +2462,7 @@ def _at_geocode(town: str, state: str):
         # Second try without the state: a town on a state border, or one whose
         # district name the page uses, often resolves country-wide.
         hit = _nominatim_lookup(f"{town}, Österreich", countrycodes="at")
-    if hit == "error":
+    if hit in ("error", "budget"):
         return (None, None)                           # transient: not cached, retried next cycle
     lat, lon = hit if hit else (None, None)
     # A hit is cached for good; a miss for a day (negative cache), so a typo
@@ -3034,6 +3088,20 @@ CREATE TABLE IF NOT EXISTS live_start(
 def db():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # A cache DB restored from a run that died mid-write can be unreadable; a
+    # crash here would be re-saved and re-restored by every successor, so
+    # check first and start cold instead (one slow cycle, not a dead chain).
+    try:
+        ok = conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    except sqlite3.DatabaseError:
+        ok = False
+    if not ok:
+        conn.close()
+        bad = DB_PATH.with_suffix(".corrupt")
+        DB_PATH.replace(bad)
+        print(f"  baza {DB_PATH.name} je pokvarjena – premaknjena v {bad.name}, začenjam na novo")
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     # A cache DB restored from an older run predates some columns.
     for table, col in (("incidents", "title_sl TEXT"), ("incidents", "raw_sl TEXT"),
@@ -3080,8 +3148,10 @@ def store(conn, rows):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     new = changed = 0
     sel = "SELECT " + ",".join(_CONTENT_COLS) + " FROM incidents WHERE id=?"
+    # A content change clears the push hash: the row is "dirty" until Supabase
+    # has it, even if the source goes quiet (304) before the next good push.
     upd = ("UPDATE incidents SET " + ",".join(f"{c}=:{c}" for c in _CONTENT_COLS)
-           + ", last_seen=:now WHERE id=:id")
+           + ", last_seen=:now, hash=NULL WHERE id=:id")
     with conn:
         for r in rows:
             vals = {c: r.get(c) for c in _CONTENT_COLS}
@@ -3262,7 +3332,15 @@ def poll_once(conn, verbose=True, full=True, resync=False):
     except Exception as e:                                        # noqa: BLE001
         mt = f"preskočeno: {type(e).__name__}"
     phases["prevod"] = time.time() - t0
-    clustered = assign_clusters(all_rows)
+    # Cluster against the stored recent rows too, or a fast cycle (without the
+    # police and other SLOW partners) would strip clusters that the next full
+    # cycle puts back — a content change every cycle for nothing.
+    seen_ids = {r["id"] for r in all_rows}
+    since = (datetime.now(LOCAL) - timedelta(days=3)).strftime("%Y-%m-%d")
+    partners = [dict(r) for r in conn.execute(
+        "SELECT id, source, country, date, time, category, lat, lon FROM incidents "
+        "WHERE country='HR' AND date >= ? AND lat IS NOT NULL", (since,)) if r["id"] not in seen_ids]
+    clustered = assign_clusters(all_rows + partners)
     t0 = time.time()
     for name, rows, status, ms in results:
         new, changed = store(conn, rows) if rows else (0, 0)

@@ -72,7 +72,7 @@ jobs:
         id: cache
         uses: actions/cache/restore@v4
         with:
-          path: vatrocad/vatrocad.sqlite3
+          path: vatrocad/vatrocad.sqlite3*
           key: vatrocad-db-${{ github.run_id }}
           restore-keys: |
             vatrocad-db-
@@ -99,7 +99,7 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: vatrocad/vatrocad.sqlite3
+          path: vatrocad/vatrocad.sqlite3*
           key: vatrocad-db-${{ github.run_id }}
 
       # Hand over: queue the next run before this one exits. GitHub does not
