@@ -1634,6 +1634,18 @@ NEWSROOMS = [
     # JVP Osijek: the category feed is disabled (404) but the query form works.
     ("JVP Osijek · intervencije", "obz", "https://vatrogasci-osijek.hr/?cat=3&feed=rss2",
      "osijek", "jvo", False),
+    # Regional crna-kronika RSS filling two previously blind counties:
+    # Dubrovnik-Neretva (only its police PU before) and Primorje-Gorski kotar /
+    # Rijeka (two feeds — they miss different calls, both cheap). DuList
+    # redirects to /crna-kronika/feed/. (Istra's only open feed, Regional
+    # Express, is general news whose incidents this parser can't classify
+    # reliably, so Istra keeps its police-PU coverage only.)
+    ("DuList · kronika", "dnz", "https://dulist.hr/crna-kronika/feed/",
+     "dubrovnik", "dul", False),
+    ("Fiuman · kronika", "pgz", "https://www.fiuman.hr/category/crna-kronika/feed/",
+     "rijeka", "fiu", False),
+    ("Riportal · kronika", "pgz", "https://riportal.net.hr/kategorija/vijesti/crna-kronika/feed/",
+     "rijeka", "rip", False),
     # National newsrooms (region=None → region from the place named; no place,
     # no row). The only afternoon coverage of Zagreb: the capital has no open
     # brigade log (JVP Zagreb's is credentialed) and its portals block bots.
@@ -2669,6 +2681,12 @@ AT_FEEDS = [
      "https://www.ff-badradkersburg.at/rss/blog", "STMK-RAD", (46.685, 15.985)),
     ("FF Feldbach · poročila", "stmk", "Steiermark",
      "https://www.feuerwehr-feldbach.at/feed/", "STMK-FB", (46.95, 15.89)),
+    # Two brigades right on the Slovenian border in Bezirk Leibnitz — their
+    # site-wide WordPress feeds, like Mureck/Radkersburg above.
+    ("FF Vogau · poročila", "stmk", "Steiermark",
+     "https://www.ffvogau.at/feed/", "STMK-VOG", (46.735, 15.585)),
+    ("FF Spielfeld · poročila", "stmk", "Steiermark",
+     "https://www.ff-spielfeld.at/feed/", "STMK-SPF", (46.708, 15.636)),
 ]
 
 # Posts on these sites that are not interventions: competitions, anniversaries,
@@ -2839,6 +2857,9 @@ AT_POLICE = [
     ("ktn",  "Policija Koroška · LPD",   "ktn",  "Kärnten",    (46.70, 14.10)),
     ("noe",  "Policija Sp. Avstrija · LPD", "noe", "Niederösterreich", (48.20, 15.70)),
     ("ooe",  "Policija Zg. Avstrija · LPD", "ooe", "Oberösterreich", (48.20, 14.00)),
+    # Southern Burgenland meets Slovenia at the Kalch tripoint near Bad
+    # Radkersburg; same BMI feed schema as the four above.
+    ("bgld", "Policija Gradiščanska · LPD", "bgld", "Burgenland", (47.846, 16.526)),
 ]
 AT_POLICE_SKIP = re.compile(
     r"Betrug|Betrüger|Einbruch|Einbrecher|Diebstahl|Dieb|gestohlen|Raub|Räuber|Raufhandel|Schläger|"
@@ -3032,6 +3053,73 @@ def rowid(source: str, date: str, time_: str, body: str) -> str:
     return f"{source.split()[0].lower()}:{hashlib.md5(seed.encode()).hexdigest()[:14]}"
 
 
+# ── ÖAMTC regional traffic feeds (per-item georss coordinates) ────────────
+# The auto club's public traffic service carries the official EVIS.at data for
+# the border-corridor motorways and B-roads (A2/A9/A11/S35, B67/B69/B70…). Most
+# of the feed is roadworks and lane closures; we keep only genuine incidents.
+AT_TRAFFIC = [
+    ("ÖAMTC promet · Štajerska", "stmk", "https://www.oeamtc.at/feeds/verkehr/steiermark.xml", (47.070, 15.439)),
+    ("ÖAMTC promet · Koroška",   "ktn",  "https://www.oeamtc.at/feeds/verkehr/kaernten.xml",   (46.624, 14.308)),
+]
+_AT_TRAFFIC_INCIDENT = re.compile(
+    r"Unfall|Fahrzeugbrand|Fahrzeug in Brand|Brand|umgestürzt|umgekippt|Baum auf|"
+    r"Bergung|geborgen|verletzt|Person|Ölspur|Hindernis|verlorene? Ladung|Tier auf", re.I)
+_AT_TRAFFIC_SKIP = re.compile(
+    r"Baustelle|Bauarbeiten|Belagsarbeiten|Sanierung|Wartung|Mäharbeiten|Reinigung|"
+    r"Nachtsperre|Tagessperre|Instandhaltung|Markierungsarbeiten|Brückenarbeiten|"
+    r"Tunnelwartung|Veranstaltung|Demonstration|Umleitung wegen Bau", re.I)
+
+
+def make_at_traffic(label, region, url, fallback):
+    """One fetcher per ÖAMTC regional traffic RSS. Incidents only — coordinates
+    come from each item's <georss:point>."""
+
+    def fetch_source():
+        out = []
+        text, status = fetch(url)
+        if text is None:
+            return out, status
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError:
+            return out, "error: bad XML"
+        geo = "{http://www.georss.org/georss}point"
+        cutoff = (datetime.now(LOCAL) - timedelta(days=AT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+        for it in root.findall(".//item"):
+            title = tidy(strip_tags(it.findtext("title") or ""))
+            body = tidy(strip_tags(it.findtext("description") or ""))
+            blob = f"{title} {body}"
+            if _AT_TRAFFIC_SKIP.search(blob) or not _AT_TRAFFIC_INCIDENT.search(blob):
+                continue
+            published = _parse_pubdate(it.findtext("pubDate") or "")
+            if published is None:
+                continue
+            date, time_ = published.strftime("%Y-%m-%d"), published.strftime("%H:%M")
+            if date < cutoff:
+                continue
+            lat, lon = fallback
+            pt = (it.findtext(geo) or "").split()
+            if len(pt) == 2:
+                try:
+                    lat, lon = float(pt[0]), float(pt[1])
+                except ValueError:
+                    lat, lon = fallback
+            out.append({
+                "id": rowid(label, date, time_, title),
+                "source": label, "region": region, "country": "AT",
+                "ref": f"OEAMTC-{region.upper()}-{date[5:7]}{date[8:]}-{time_.replace(':', '')}",
+                "date": date, "time": time_,
+                "category": "fire" if re.search(r"brand|feuer", blob, re.I) else "accident",
+                "status": "active", "title": title[:120],
+                "location": title.split(",")[0][:80] + f" ({'Steiermark' if region == 'stmk' else 'Kärnten'})",
+                "lat": lat, "lon": lon, "units": None, "crew": None, "vehicles": None,
+                "raw": body[:1600], "link": tidy(it.findtext("link") or ""),
+            })
+        return out, status
+
+    return fetch_source
+
+
 SOURCES = [
     ("DVD Vratišinec",    src_vratisinec,    "WordPress REST API"),
     ("VZ Međimurske ž.",  src_vz_medjimurje, "WP classic RSS, cat=3"),
@@ -3053,6 +3141,8 @@ SOURCES = [
       for (label, region, state, url, pfx, fb) in AT_FEEDS],
     *[(label, make_at_police(code, label, region, state, fb), "BMI police press RSS")
       for (code, label, region, state, fb) in AT_POLICE],
+    *[(label, make_at_traffic(label, region, url, fb), "ÖAMTC georss traffic")
+      for (label, region, url, fb) in AT_TRAFFIC],
     ("Meteoalarm",        src_meteoalarm,    "CAP 1.2 Atom feed"),
 ]
 

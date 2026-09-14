@@ -35,9 +35,10 @@ export const HR_REG: Record<string, string> = {
 };
 export const AT_STATE: Record<string, string> = {
   ooe: 'Zgornja Avstrija', noe: 'Spodnja Avstrija', stmk: 'Štajerska', ktn: 'Koroška',
+  bgld: 'Gradiščanska',
 };
-export const AT_SHORT: Record<string, string> = { ooe: 'OÖ', noe: 'NÖ', stmk: 'Štajerska', ktn: 'Koroška' };
-export const AT_BORDER = new Set(['stmk', 'ktn']);
+export const AT_SHORT: Record<string, string> = { ooe: 'OÖ', noe: 'NÖ', stmk: 'Štajerska', ktn: 'Koroška', bgld: 'Gradiščanska' };
+export const AT_BORDER = new Set(['stmk', 'ktn', 'bgld']);
 
 export const COUNTRY_LABEL: Record<string, string> = { AT: 'Avstrija', HR: 'Hrvaška', all: 'Vse' };
 
