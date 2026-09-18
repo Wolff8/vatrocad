@@ -2956,57 +2956,101 @@ _STMK_LIST_RE = re.compile(
     r'(\d{2})\.(\d{2})\.(\d{4})(?:(?!\d{2}\.\d{2}\.\d{4}).){0,400}?<a[^>]+href="([^"]*read-\d+/?)"[^>]*>(.*?)</a>', re.S)
 
 
-def src_at_stmk_lfv():
-    """Styria's LFV "Einsätze / Berichte aus den Bereichen": the statewide list
-    of brigade reports, several a day, each with its own page whose meta
-    description carries the alarm time and town. Only pages not yet stored
-    are fetched (capped per cycle), so a poll costs a handful of requests."""
-    out = []
-    text, status = fetch(_STMK_LFV + "Home/Aktuelles/Einsaetze-Berichte.aspx")
-    if text is None:
-        return out, status
-    now = datetime.now(LOCAL)
-    cutoff = (now - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+# Styria's fire service runs one DotNetNuke CMS for the state association (LFV)
+# and every Bereichsfeuerwehrverband (BFV). The LFV "Einsätze / Berichte aus
+# den Bereichen" page only aggregates what a Bereich chooses to push up — by
+# September 2026 that was Murau alone — while each BFV keeps its own, fuller
+# "Einsätze" list. The five Bereiche on the Slovenian border are read
+# directly; same list markup, same report pages, same parser.
+#   (label, site base, list path, id prefix, ref prefix, article budget key,
+#    fallback (lat, lon) for a report that names no town, or None)
+AT_LFV_LISTS = [
+    ("LFV Štajerska · poročila", _STMK_LFV, "Home/Aktuelles/Einsaetze-Berichte.aspx",
+     "AT-STMK", "STMK-LFV", "stmk_lfv", None),
+    ("BFV Leibnitz · poročila", "https://www.bfvlb.steiermark.at/", "desktopdefault.aspx/tabid-1963/",
+     "AT-STMK-LB", "STMK-LB", "bfv_lb", (46.782, 15.545)),
+    ("BFV Deutschlandsberg · poročila", "https://www.bfvdl.steiermark.at/", "desktopdefault.aspx/tabid-104/",
+     "AT-STMK-DL", "STMK-DL", "bfv_dl", (46.815, 15.218)),
+    ("BFV Radkersburg · poročila", "https://www.bfvra.steiermark.at/", "desktopdefault.aspx/tabid-871/",
+     "AT-STMK-RA", "STMK-RA", "bfv_ra", (46.685, 15.985)),
+    ("BFV Feldbach · poročila", "https://www.bfvfb.steiermark.at/", "desktopdefault.aspx/tabid-2368/",
+     "AT-STMK-FB", "STMK-FB", "bfv_fb", (46.953, 15.888)),
+    ("BFV Graz-Umgebung · poročila", "https://www.bfvgu.steiermark.at/", "desktopdefault.aspx/tabid-681/",
+     "AT-STMK-GU", "STMK-GU", "bfv_gu", (47.071, 15.439)),
+]
+
+
+def make_at_lfv_list(label, base, path, id_prefix, ref_prefix, budget_key, fallback):
+    """One fetcher per LFV/BFV Steiermark report list: dated title links, each
+    with its own page whose text carries the alarm time and town. Only pages
+    not yet stored are fetched (capped per cycle), so a poll costs a handful of
+    requests."""
 
     def detail(html):
         m = re.search(r'<div class="detailnews">(.*?)</div>', html, re.S)
         if not m:
             return None                                   # not the report page: do not cache
-        return tidy(strip_tags(re.sub(r"<h[12][^>]*>.*?</h[12]>|<p class=\"author\">.*?</p>", " ",
-                                      m.group(1), flags=re.S))) or None
+        text = tidy(strip_tags(re.sub(r"<h[12][^>]*>.*?</h[12]>|<p class=\"author\">.*?</p>", " ",
+                                      m.group(1), flags=re.S)))
+        # The BFV pages open with the posting byline ("Erstellt von X am
+        # 04.09.2026"); dropped so the call's own date in the narrative wins.
+        text = re.sub(r"^\s*(?:[^.]{0,80}?\s)?Erstellt von .*? am \d{1,2}\.\d{1,2}\.\d{4}\s*", "", text)
+        return text or None
 
-    for dd, mo, yy, href, raw_title in _STMK_LIST_RE.findall(text):
-        title = tidy(strip_tags(raw_title))
-        date = f"{yy}-{mo}-{dd}"
-        if date < cutoff or not title:
-            continue
-        cat = _at_report_category(title)
-        if cat is None:
-            continue
-        link = _STMK_LFV + href.lstrip("/")
-        rid = rowid("AT-STMK", date, "", title)
-        # The report page is read once ever (article cache); a failed or
-        # unusable fetch is not cached, so the row is completed on a later cycle
-        # instead of staying without alarm time and town for good.
-        body = fetch_article(link, detail, budget_key="stmk_lfv", budget=10)
-        if body:
-            _d, time_ = _at_report_when(body, datetime(int(yy), int(mo), int(dd), 12, 0, tzinfo=LOCAL))
-            if not re.search(r"(?:um|gegen)\s+\d{1,2}[:.]\d{2}", body):
-                time_ = ""
-            town = _at_report_town(title) or _at_report_town(body)
-        else:
-            body, time_ = title, ""
-            town = _at_report_town(title)
-        lat, lon = _at_geocode(town, "Steiermark") if town else (None, None)
-        location = f"{town} (Steiermark)" if town else "Steiermark"
-        out.append({
-            "id": rid, "source": "LFV Štajerska · poročila", "region": "stmk", "country": "AT",
-            "ref": f"STMK-LFV-{mo}{dd}", "date": date, "time": time_ or "",
-            "category": cat, "title": title[:120], "status": "closed",
-            "location": location, "lat": lat, "lon": lon,
-            "units": None, "crew": None, "vehicles": None, "raw": (body or "")[:1600], "link": link,
-        })
-    return out, status
+    def fetch_source():
+        out = []
+        text, status = fetch(base + path)
+        if text is None:
+            return out, status
+        cutoff = (datetime.now(LOCAL) - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+        seen = set()
+        for dd, mo, yy, href, raw_title in _STMK_LIST_RE.findall(text):
+            title = tidy(strip_tags(raw_title))
+            date = f"{yy}-{mo}-{dd}"
+            # "weiter lesen" is the second link of the same item on the BFV pages.
+            if date < cutoff or not title or title.lower().startswith("weiter lesen"):
+                continue
+            cat = _at_report_category(title)
+            if cat is None:
+                continue
+            link = href if href.startswith("http") else base + href.lstrip("/")
+            if link in seen:
+                continue
+            seen.add(link)
+            rid = rowid(id_prefix, date, "", title)
+            # The report page is read once ever (article cache); a failed or
+            # unusable fetch is not cached, so the row is completed on a later
+            # cycle instead of staying without alarm time and town for good.
+            body = fetch_article(link, detail, budget_key=budget_key, budget=10)
+            if body:
+                # The page date is the posting date; the text names the call's
+                # own day ("Am Samstag, dem 29. August 2026, … um 19:57 Uhr").
+                date, time_ = _at_report_when(body, datetime(int(yy), int(mo), int(dd), 12, 0, tzinfo=LOCAL))
+                if not re.search(r"(?:um|gegen)\s+\d{1,2}[:.]\d{2}", body):
+                    time_ = ""
+                town = _at_report_town(title) or _at_report_town(body)
+            else:
+                body, time_ = title, ""
+                town = _at_report_town(title)
+            lat, lon = _at_geocode(town, "Steiermark") if town else (None, None)
+            if lat is None and fallback:
+                lat, lon = fallback
+            location = f"{town} (Steiermark)" if town else (
+                label.split(" ·")[0].replace("BFV ", "") + " (Steiermark)" if fallback else "Steiermark")
+            out.append({
+                "id": rid, "source": label, "region": "stmk", "country": "AT",
+                "ref": f"{ref_prefix}-{mo}{dd}", "date": date, "time": time_ or "",
+                "category": cat, "title": title[:120], "status": "closed",
+                "location": location, "lat": lat, "lon": lon,
+                "units": None, "crew": None, "vehicles": None, "raw": (body or "")[:1600], "link": link,
+            })
+        return out, status
+
+    return fetch_source
+
+
+# Kept under its old name: the statewide list is the first entry above.
+src_at_stmk_lfv = make_at_lfv_list(*AT_LFV_LISTS[0])
 
 
 def place_label(text: str):
@@ -3136,7 +3180,8 @@ SOURCES = [
     ("HAC · autoceste",   src_hac,           "HTML, national motorway network"),
     ("NÖ Feuerwehr · Wastl", src_at_noe,      "HTML, Lower Austria state dispatch"),
     ("OÖ Feuerwehr · LFV", src_at_ooe,        "HTML, Upper Austria state dispatch"),
-    ("LFV Štajerska · poročila", src_at_stmk_lfv, "HTML list + report pages, Styria"),
+    *[(label, make_at_lfv_list(label, base, path, idp, refp, bk, fb), "HTML list + report pages, Styria")
+      for (label, base, path, idp, refp, bk, fb) in AT_LFV_LISTS],
     *[(label, make_at_feed(label, region, state, url, pfx, fb), "brigade report RSS")
       for (label, region, state, url, pfx, fb) in AT_FEEDS],
     *[(label, make_at_police(code, label, region, state, fb), "BMI police press RSS")
@@ -3273,7 +3318,8 @@ def store(conn, rows):
 # the first cycle of a job always run everything. Labels must match SOURCES.
 SLOW_SOURCES = frozenset({
     "Policija · 20 PU", "HAC · autoceste", "Meteoalarm", "HGSS · spašavanje",
-    "DVD Horvati", "VZ Međimurske ž.", "LFV Štajerska · poročila",
+    "DVD Horvati", "VZ Međimurske ž.",
+    *[label for (label, *_rest) in AT_LFV_LISTS],
     *[label for (label, *_rest) in AT_FEEDS],
 })
 
