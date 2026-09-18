@@ -1,5 +1,5 @@
 import type { ControlRow, RawIncident, SourceStatus } from './types';
-import { BASE, FIXTURE_MODE, LIST_CAP, LIST_COLS, LOAD_DAYS, SB_KEY, SB_URL } from './config';
+import { BASE, BORDER_CAP, BORDER_REGIONS, FIXTURE_MODE, LIST_CAP, LIST_COLS, LOAD_DAYS, SB_KEY, SB_URL } from './config';
 import { cutoffDate, localToEpoch, zonedParts } from './time';
 
 const HDR = { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` };
@@ -68,11 +68,26 @@ export async function fetchInitial(now = Date.now()): Promise<{ rows: RawInciden
   const since = cutoffDate(now, LOAD_DAYS);
   const q = (c: string) =>
     `incidents?select=${LIST_COLS}&country=eq.${c}&occurred=gte.${since}&order=ts.desc.nullslast&limit=${LIST_CAP}`;
-  const [at, hr] = await Promise.all([rest<RawIncident[]>(q('AT')), rest<RawIncident[]>(q('HR'))]);
+  // The border belt is fetched separately: Lower/Upper Austria's dispatch logs
+  // are so much louder than Styria and Carinthia that a single time-ordered
+  // query returned no border rows at all once the cap was reached.
+  const border =
+    `incidents?select=${LIST_COLS}&country=eq.AT&region=in.(${BORDER_REGIONS.join(',')})`
+    + `&occurred=gte.${since}&order=ts.desc.nullslast&limit=${BORDER_CAP}`;
+  const [at, hr, bd] = await Promise.all([
+    rest<RawIncident[]>(q('AT')), rest<RawIncident[]>(q('HR')), rest<RawIncident[]>(border),
+  ]);
   const capped: string[] = [];
   if (at.length >= LIST_CAP) capped.push('AT');
   if (hr.length >= LIST_CAP) capped.push('HR');
-  return { rows: [...at, ...hr], capped };
+  const seen = new Set<string>();
+  const rows: RawIncident[] = [];
+  for (const r of [...at, ...hr, ...bd]) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    rows.push(r);
+  }
+  return { rows, capped };
 }
 
 /** Rows touched since `maxSeen` (poller upserts move last_seen). */

@@ -3,8 +3,13 @@
 export const SB_URL = 'https://ofzwkanpjhdvlygrhbum.supabase.co';
 export const SB_KEY = 'sb_publishable_l3UZaMzvgu_8nknqN-xB7g_VZauptFm';
 
-export const LIST_CAP = 300;            // rows per country on the initial load
+export const LIST_CAP = 500;            // rows per country on the initial load
 export const LOAD_DAYS = 8;             // occurred >= today - 8 d
+/** Lower and Upper Austria's live dispatch logs produce ~1000 rows a week —
+ *  ordering by time alone pushed the whole Slovenian border belt past the cap,
+ *  so the border regions get their own guaranteed slice of the initial load. */
+export const BORDER_REGIONS = ['stmk', 'ktn', 'bgld'];
+export const BORDER_CAP = 250;
 export const NEW_MINUTES = 30;          // 'NOVO' highlight window (first_seen)
 export const HEAD_CHECK_MS = 60_000;    // control-row probe
 export const FULL_RELOAD_MS = 600_000;  // full re-fetch (catches deletes)

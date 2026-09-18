@@ -179,7 +179,9 @@ export function tidy(s: string): string {
   return s.replace(/[​‌﻿]/g, '').replace(/\s+/g, ' ').trim();
 }
 
-const AT_CODE = /^(SOF|[BTSU])\s?\d\s*[-–:]?\s*/i;
+// Alarm codes are one digit ("B1", "T2 -", "SOF2"); the (?!\d) guard keeps a
+// road number out of it — "B83 Krumpendorf" was rendering as "3 Krumpendorf".
+const AT_CODE = /^(SOF|[BTSU])\s?\d(?!\d)\s*[-–:]?\s*/i;
 const RUNNING = /\s*\((v teku|läuft)[^)]*\)\s*$/i;
 
 /** Subject of the incident: the title stripped of dispatch codes / running-time suffixes,

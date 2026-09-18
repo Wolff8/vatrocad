@@ -2985,9 +2985,12 @@ _STMK_LIST_RE = re.compile(
 AT_LFV_LISTS = [
     ("LFV Štajerska · poročila", _STMK_LFV, "Home/Aktuelles/Einsaetze-Berichte.aspx",
      "AT-STMK", "STMK-LFV", "stmk_lfv", None),
-    ("BFV Leibnitz · poročila", "https://www.bfvlb.steiermark.at/", "desktopdefault.aspx/tabid-1963/",
+    # Leibnitz keeps several report tabs; "Berichte" (1550) aggregates the
+    # brigades' own reports and runs freshest. Deutschlandsberg's 103 carries
+    # more incidents than the 104 landing tab.
+    ("BFV Leibnitz · poročila", "https://www.bfvlb.steiermark.at/", "desktopdefault.aspx/tabid-1550/",
      "AT-STMK-LB", "STMK-LB", "bfv_lb", (46.782, 15.545)),
-    ("BFV Deutschlandsberg · poročila", "https://www.bfvdl.steiermark.at/", "desktopdefault.aspx/tabid-104/",
+    ("BFV Deutschlandsberg · poročila", "https://www.bfvdl.steiermark.at/", "desktopdefault.aspx/tabid-103/",
      "AT-STMK-DL", "STMK-DL", "bfv_dl", (46.815, 15.218)),
     ("BFV Radkersburg · poročila", "https://www.bfvra.steiermark.at/", "desktopdefault.aspx/tabid-871/",
      "AT-STMK-RA", "STMK-RA", "bfv_ra", (46.685, 15.985)),
