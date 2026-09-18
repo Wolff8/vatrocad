@@ -2687,6 +2687,11 @@ AT_FEEDS = [
      "https://www.ffvogau.at/feed/", "STMK-VOG", (46.735, 15.585)),
     ("FF Spielfeld · poročila", "stmk", "Steiermark",
      "https://www.ff-spielfeld.at/feed/", "STMK-SPF", (46.708, 15.636)),
+    # Carinthian water rescue: the state association's "Einsatz" category
+    # (searches, diving call-outs, bathing accidents on the lakes and the Drau).
+    # Seat fallback is the training centre at Velden.
+    ("ÖWR Koroška · vodni reševalci", "ktn", "Kärnten",
+     "https://www.oewr-kaernten.at/cms/blog/category/einsatz/feed/", "KTN-OEWR", (46.612, 14.045)),
 ]
 
 # Posts on these sites that are not interventions: competitions, anniversaries,
@@ -2708,7 +2713,7 @@ AT_REPORT_CATCODE = [
      r"geborgen|Bergung|Wasserschaden|Auspump|Keller|Fahrzeugbergung|Türöffnung|Technisch", "tech"),
     (r"Einsatz|Alarm|alarmiert", "other"),
 ]
-_AT_TOWN_STOP = {"Bronze", "Silber", "Gold", "Brand", "Vollbrand", "Flammen", "Kürze", "Einsatz",
+_AT_TOWN_STOP = {"Seenot", "Einsatz", "Bronze", "Silber", "Gold", "Brand", "Vollbrand", "Flammen", "Kürze", "Einsatz",
                  "Zusammenarbeit", "Not", "Gefahr", "Aktion", "Sicherheit", "Höhe", "Tiefe", "Richtung",
                  "Folge", "Zukunft", "Bewegung", "Kärnten", "Steiermark", "Österreich", "Bereich",
                  "Abschnitt", "Bezirk", "Land", "Wald", "Wiese", "Feld", "Garage", "Keller", "Haus",
@@ -3178,6 +3183,60 @@ def make_at_traffic(label, region, url, fallback):
     return fetch_source
 
 
+# ── Bergrettung Kärnten: the state mountain-rescue service's incident list ──
+# Per-call cards (date, title, Ortsstelle, "<type> in <place> auf <alt>m") on
+# bergrettung-kaernten.at, each with a page carrying "Einsatzdauer: start – end".
+# Sparse (a few a month) but exactly the Karawanken border: Bad Eisenkappel,
+# Ferlach, Rosental, Villach.
+_BR_KTN = "https://bergrettung-kaernten.at"
+_BR_KTN_CARD = re.compile(
+    r'<p class="uk-h5 uk-margin-remove">\s*(\d{2})\.(\d{2})\.(\d{4})\s*</p>\s*<p class="uk-h3[^"]*">(.*?)</p>\s*'
+    r'<div class="uk-text-default">\s*<b>(.*?)</b>\s*<br\s*/?>(.*?)</div>(?:(?!<p class="uk-h5).){0,600}?href="([^"]*/de/einsatz/[^"]+)"', re.S)
+
+
+def src_bergrettung_ktn():
+    out = []
+    text, status = fetch(_BR_KTN + "/de/oebrd-kaernten/einsaetze")
+    if text is None:
+        return out, status
+    cutoff = (datetime.now(LOCAL) - timedelta(days=AT_REPORT_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+
+    def detail(html):
+        m = re.search(r"Einsatzdauer:?\s*(\d{2}\.\d{2}\.\d{4})\s+(\d{1,2}:\d{2})", html)
+        body = tidy(strip_tags(re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S)))
+        # Keep the narrative part only (page chrome before the title is noise).
+        return (f"Einsatzbeginn {m.group(1)} {m.group(2)}. " if m else "") + body[:1400]
+
+    for dd, mo, yy, raw_title, station, raw_kind, href in _BR_KTN_CARD.findall(text):
+        date = f"{yy}-{mo}-{dd}"
+        if date < cutoff:
+            continue
+        title = tidy(strip_tags(raw_title))
+        station = tidy(strip_tags(station)).replace("Ortsstelle", "").strip()
+        kind = tidy(strip_tags(raw_kind))
+        link = href if href.startswith("http") else _BR_KTN + href
+        body = fetch_article(link, detail, budget_key="br_ktn", budget=6) or f"{kind}. {title}"
+        tm = re.search(r"Einsatzbeginn \d{2}\.\d{2}\.\d{4} (\d{1,2}):(\d{2})", body)
+        time_ = f"{int(tm.group(1)):02d}:{tm.group(2)}" if tm else ""
+        pm = re.search(r"\bin\s+([A-ZÄÖÜ][\wäöüß.\- ]{2,40}?)(?:\s+auf\s+[\d.]+\s?m|\s*$)", kind)
+        place = tidy(pm.group(1)) if pm else None
+        lat, lon = _at_geocode(place, "Kärnten") if place else (None, None)
+        if lat is None and station:
+            lat, lon = _at_geocode(station, "Kärnten")
+        if lat is None:
+            lat, lon = (46.624, 14.306)                    # Landesleitung, Klagenfurt
+        out.append({
+            "id": rowid("AT-BR-KTN", date, "", title), "source": "Gorska reševalna Koroška · ÖBRD",
+            "region": "ktn", "country": "AT", "ref": f"BR-KTN-{mo}{dd}", "date": date, "time": time_,
+            "category": "rescue", "title": (title or kind)[:120], "status": "closed",
+            "location": f"{place or station} (Kärnten)",
+            "lat": lat, "lon": lon,
+            "units": ", ".join([f"Bergrettung {station}"] + [h for h in at_helpers(body) if not h.startswith("Bergrettung")]) if station else None,
+            "crew": None, "vehicles": None, "raw": body[:1600], "link": link,
+        })
+    return out, status
+
+
 SOURCES = [
     ("DVD Vratišinec",    src_vratisinec,    "WordPress REST API"),
     ("VZ Međimurske ž.",  src_vz_medjimurje, "WP classic RSS, cat=3"),
@@ -3202,6 +3261,7 @@ SOURCES = [
       for (code, label, region, state, fb) in AT_POLICE],
     *[(label, make_at_traffic(label, region, url, fb), "ÖAMTC georss traffic")
       for (label, region, url, fb) in AT_TRAFFIC],
+    ("Gorska reševalna Koroška · ÖBRD", src_bergrettung_ktn, "HTML list + report pages, Carinthia"),
     ("Meteoalarm",        src_meteoalarm,    "CAP 1.2 Atom feed"),
 ]
 
@@ -3332,7 +3392,7 @@ def store(conn, rows):
 # the first cycle of a job always run everything. Labels must match SOURCES.
 SLOW_SOURCES = frozenset({
     "Policija · 20 PU", "HAC · autoceste", "Meteoalarm", "HGSS · spašavanje",
-    "DVD Horvati", "VZ Međimurske ž.",
+    "DVD Horvati", "VZ Međimurske ž.", "Gorska reševalna Koroška · ÖBRD",
     *[label for (label, *_rest) in AT_LFV_LISTS],
     *[label for (label, *_rest) in AT_FEEDS],
 })
