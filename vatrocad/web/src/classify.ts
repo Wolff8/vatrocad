@@ -27,8 +27,12 @@ export function kindOf(i: Pick<RawIncident, 'source' | 'country' | 'ref' | 'cate
   return 'dispatch';
 }
 
+/** Air rescue: Christophorus / C1x / RK-1,2 / Notarzthubschrauber / HGSS helicopter. */
 export const isHeli = (text: string | null | undefined): boolean =>
-  /Hubschrauber|Landeplatz|Notarzt|helikopter/i.test(text || '');
+  /hubschrauber|christophorus|\bC\s?1\d\b|\bRK-?[12]\b|helikopter|landeplatz|flugrettung/i.test(text || '');
+/** Ground EMS and rescue services (DE + HR + SL vocabulary). */
+export const isEms = (text: string | null | undefined): boolean =>
+  /notarzt|notärzt|rettungsdienst|rotes kreuz|\brettung\b|rettungswagen|sanitäter|samariter|\bRTW\b|\bNEF\b|hitna pomoć|hitne pomoći|hitnu pomoć|\bhitna\b|\bZHM\b|reševalc|\bNMP\b|zdravnik/i.test(text || '');
 
 export function normCategory(c: string | null | undefined): Category {
   return c && CATS.has(c) ? (c as Category) : 'other';
@@ -77,6 +81,7 @@ export function mapRow(r: RawIncident, prev?: Incident): Incident {
     firstSeenMs, lastSeenMs, lat, lon,
     active: isActive(cat, st),
     heli: isHeli(r.title) || isHeli(r.units) || isHeli(raw),
+    ems: isEms(r.title) || isEms(r.units) || isEms(raw),
     hay, hasRaw, raw, raw_sl,
   };
 }

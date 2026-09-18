@@ -46,7 +46,10 @@ export interface Incident extends RawIncident {
   firstSeenMs: number;
   lastSeenMs: number;
   active: boolean;
+  /** Text names an air-rescue helicopter (Christophorus, C1x, RK-1/2, Notarzthubschrauber…). */
   heli: boolean;
+  /** Text names ground EMS / rescue partners (Notarzt, Rettungsdienst, Rotes Kreuz, hitna pomoć…). */
+  ems: boolean;
   /** Folded search haystack (no diacritics, lower-case). */
   hay: string;
   /** True once raw/raw_sl have been fetched (or were present). */

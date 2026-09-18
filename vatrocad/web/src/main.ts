@@ -235,6 +235,7 @@ function onChip(e: Event): void {
     case 'cat': setFilter('cat', v as Filters['cat']); break;
     case 'r': setFilter('r', v); break;
     case 'b': setFilter('b', !F.b); break;
+    case 't': setFilter('t', F.t === v || v === 'all' ? 'all' : (v as Filters['t'])); break;
     case 'd': { const d = Number(v); if (d && !pos) requestPosition(d); else setFilter('d', d); break; }
     default: break;
   }

@@ -148,7 +148,7 @@ export class IncidentList {
 }
 
 function rowSig(i: Incident, now: number): string {
-  return `${i.st}|${i.title_sl ?? ''}|${i.title ?? ''}|${i.location ?? ''}|${i.units ?? ''}|${i.epoch}|${i.cat}|${i.kind}|${isNew(i, now, NEW_MINUTES) ? 1 : 0}`;
+  return `${i.st}|${i.title_sl ?? ''}|${i.title ?? ''}|${i.location ?? ''}|${i.units ?? ''}|${i.epoch}|${i.cat}|${i.kind}|${i.heli ? 1 : 0}${i.ems ? 1 : 0}|${isNew(i, now, NEW_MINUTES) ? 1 : 0}`;
 }
 
 function applyState(el: HTMLElement, i: Incident, now: number): void {
@@ -180,6 +180,8 @@ export function rowHTML(i: Incident, now: number): string {
         <span class="novo pill new" ${isNew(i, now, NEW_MINUTES) ? '' : 'hidden'}>${T.novo}</span>
         <span class="lo">${ic('pin')}<span>${esc(i.location || '—')}</span></span>
         ${reg ? `<span class="tag">${esc(reg)}</span>` : ''}
+        ${i.heli ? `<span class="tag heli" title="V besedilu je omenjen reševalni helikopter">${ic('heli')}helikopter</span>` : ''}
+        ${i.ems && !i.heli ? `<span class="tag ems" title="V besedilu so omenjeni reševalci / NMP">${ic('ems')}reševalci</span>` : ''}
         <span class="tag src" title="${esc(KIND[i.kind].hint)}">${ic(KIND[i.kind].icon)}${esc(i.source)}</span>
       </div>
       ${chips.length ? `<div class="units">${chips.map((u) => `<span class="uc">${esc(u)}</span>`).join('')}${more ? `<span class="uc more">+${more}</span>` : ''}</div>` : ''}

@@ -17,10 +17,12 @@ export interface Filters {
   q: string;             // raw query text
   b: boolean;            // AT border belt only
   d: number;             // near-me radius km, 0 = off
+  t: TagFilter;          // helicopter / EMS mention
 }
+export type TagFilter = 'all' | 'heli' | 'ems';
 
 export const DEFAULT_FILTERS: Filters = {
-  c: 'all', r: 'all', k: 'all', cat: 'all', s: 'all', w: 24, q: '', b: false, d: 0,
+  c: 'all', r: 'all', k: 'all', cat: 'all', s: 'all', w: 24, q: '', b: false, d: 0, t: 'all',
 };
 
 const WINDOW_SET = new Set(WINDOWS.map((w) => w.h));
@@ -41,6 +43,7 @@ export function parseHash(hash: string): { f: Partial<Filters>; id?: string; v?:
   const q = p.get('q'); if (q !== null) f.q = q.slice(0, 120);
   const b = p.get('b'); if (b !== null) f.b = b === '1';
   if (p.has('d')) { const d = Number(p.get('d')); if (d === 0 || RADII.includes(d)) f.d = d; }
+  const t = p.get('t'); if (t === 'all' || t === 'heli' || t === 'ems') f.t = t;
   const id = p.get('id') || undefined;
   const v = p.get('v'); const view = v === 'map' ? 'map' : v === 'list' ? 'list' : undefined;
   return { f, id, ...(view ? { v: view } : {}) };
@@ -58,6 +61,7 @@ export function toHash(f: Filters, extra: { id?: string | null; v?: 'list' | 'ma
   if (f.q) p.set('q', f.q);
   if (f.b) p.set('b', '1');
   if (f.d) p.set('d', String(f.d));
+  if (f.t !== 'all') p.set('t', f.t);
   if (extra.v === 'map') p.set('v', 'map');
   if (extra.id) p.set('id', extra.id);
   const s = p.toString();
@@ -77,6 +81,7 @@ export function activeFilterCount(f: Filters): number {
   if (f.w !== DEFAULT_FILTERS.w) n++;
   if (f.b) n++;
   if (f.d) n++;
+  if (f.t !== 'all') n++;
   return n;
 }
 
@@ -125,11 +130,14 @@ function matchQuery(i: Incident, q: string): boolean {
   if (!q) return true;
   return i.hay.includes(q);
 }
+function matchTag(i: Incident, f: Filters): boolean {
+  return f.t === 'all' || (f.t === 'heli' ? i.heli : i.ems);
+}
 
 export function matches(i: Incident, f: Filters, ctx: FilterCtx, q = fold(f.q.trim())): boolean {
   return matchCountry(i, f) && matchRegion(i, f) && matchKind(i, f) && matchCat(i, f)
     && matchStatus(i, f) && matchWindow(i, f, ctx) && matchBorder(i, f) && matchNear(i, f, ctx)
-    && matchQuery(i, q);
+    && matchTag(i, f) && matchQuery(i, q);
 }
 
 export function applyFilters(rows: Iterable<Incident>, f: Filters, ctx: FilterCtx): Incident[] {
@@ -190,21 +198,24 @@ export interface FacetCounts {
   w: Record<string, number>;
   b: number;
   d: Record<string, number>;
+  t: Record<string, number>;
 }
 
 /** For every chip: how many rows would show if that chip alone were changed. */
 export function facetCounts(rows: Iterable<Incident>, f: Filters, ctx: FilterCtx): FacetCounts {
   const q = fold(f.q.trim());
-  const out: FacetCounts = { c: {}, r: {}, k: {}, cat: {}, s: {}, w: {}, b: 0, d: {} };
+  const out: FacetCounts = { c: {}, r: {}, k: {}, cat: {}, s: {}, w: {}, b: 0, d: {}, t: {} };
   const inc = (o: Record<string, number>, k: string) => { o[k] = (o[k] || 0) + 1; };
   const statusKeys: StatusFilter[] = ['all', 'active', 'contained', 'closed', 'report'];
   for (const i of rows) {
     const mc = matchCountry(i, f), mr = matchRegion(i, f), mk = matchKind(i, f), mcat = matchCat(i, f),
       ms = matchStatus(i, f), mw = matchWindow(i, f, ctx), mb = matchBorder(i, f), mn = matchNear(i, f, ctx),
-      mq = matchQuery(i, q);
+      mt = matchTag(i, f), mq = matchQuery(i, q);
     const rest = (skip: string) =>
       (skip === 'c' || mc) && (skip === 'r' || mr) && (skip === 'k' || mk) && (skip === 'cat' || mcat)
-      && (skip === 's' || ms) && (skip === 'w' || mw) && (skip === 'b' || mb) && (skip === 'd' || mn) && mq;
+      && (skip === 's' || ms) && (skip === 'w' || mw) && (skip === 'b' || mb) && (skip === 'd' || mn)
+      && (skip === 't' || mt) && mq;
+    if (rest('t')) { inc(out.t, 'all'); if (i.heli) inc(out.t, 'heli'); if (i.ems) inc(out.t, 'ems'); }
     if (rest('c')) { inc(out.c, 'all'); inc(out.c, i.country); }
     if (rest('r') && i.region) { inc(out.r, 'all'); inc(out.r, i.region); }
     if (rest('k')) { inc(out.k, 'all'); inc(out.k, i.kind); }

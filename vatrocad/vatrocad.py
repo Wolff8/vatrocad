@@ -2829,6 +2829,7 @@ def make_at_feed(label, region, state, url, prefix, fallback):
             if lat is None:
                 lat, lon = fallback
             units = sorted({tidy(u) for u in re.findall(r"\b(?:FF|BF|Feuerwehr)\s+[A-ZÄÖÜ][\wäöüß-]+(?:\s+(?:am|ob|im|an der)\s+[A-ZÄÖÜ][\wäöüß-]+)?", body)})
+            units += [h for h in at_helpers(body) if h not in units]
             out.append({
                 "id": rowid("AT-" + prefix, date, time_, title),
                 "source": label, "region": region, "country": "AT",
@@ -2877,6 +2878,20 @@ AT_POLICE_CATCODE = [
      r"Leiche|Todesfall", "ems"),
 ]
 _POL_STMK_HEAD = re.compile(r"^\s*([^|]{2,40})\|\s*([A-ZÄÖÜ][\wäöüß.\- ]{1,50}?)\s*[.–-]+\s*")
+
+
+# Emergency-medical and rescue partners named in Austrian texts — police
+# releases, brigade reports and LFV/BFV pages alike. Kept as unit chips so the
+# console can offer "helikopter" / "reševalci" filters without the full text.
+_AT_HELPERS_RE = re.compile(
+    r"\b(?:FF|Feuerwehr|Bergrettung|Wasserrettung|Höhlenrettung)\s+[A-ZÄÖÜ][\wäöüß-]+|"
+    r"(?:Notarzt|Rettungs)hubschrauber(?:\s+(?:C|RK)\s?-?\d+)?|Christophorus\s?\d+|\bC\s?1\d\b|\bRK-?[12]\b|"
+    r"Rotes Kreuz|Rettung(?:sdienst)?|Notarzt|Notärztin|Samariterbund|Alpinpolizei|Flugpolizei|Polizeihubschrauber")
+
+
+def at_helpers(body: str):
+    """Sorted, de-duplicated partner units mentioned in the text."""
+    return sorted({tidy(u) for u in _AT_HELPERS_RE.findall(body or "")})
 
 
 def make_at_police(code, label, region, state, fallback):
@@ -2929,9 +2944,7 @@ def make_at_police(code, label, region, state, fallback):
             lat, lon = _at_geocode(town, state) if town else (None, None)
             if lat is None:
                 lat, lon = fallback
-            helpers = sorted({tidy(u) for u in re.findall(
-                r"\b(?:FF|Feuerwehr|Bergrettung|Wasserrettung)\s+[A-ZÄÖÜ][\wäöüß-]+|Rettungshubschrauber(?:\s+C\s?\d+)?|"
-                r"Christophorus\s?\d+|Rotes Kreuz|Rettung(?:sdienst)?|Notarzt|Alpinpolizei", body)})
+            helpers = at_helpers(body)
             loc = town or district or state
             if district and town and district != town:
                 loc = f"{town} ({district})"
@@ -3042,7 +3055,8 @@ def make_at_lfv_list(label, base, path, id_prefix, ref_prefix, budget_key, fallb
                 "ref": f"{ref_prefix}-{mo}{dd}", "date": date, "time": time_ or "",
                 "category": cat, "title": title[:120], "status": "closed",
                 "location": location, "lat": lat, "lon": lon,
-                "units": None, "crew": None, "vehicles": None, "raw": (body or "")[:1600], "link": link,
+                "units": ", ".join(at_helpers(body or "")) or None, "crew": None, "vehicles": None,
+                "raw": (body or "")[:1600], "link": link,
             })
         return out, status
 

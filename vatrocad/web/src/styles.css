@@ -137,6 +137,8 @@ svg.ic{width:1em;height:1em;fill:currentColor;vertical-align:-.15em;flex:none}
 .pill.new{background:color-mix(in srgb,var(--ok) 22%,transparent);color:var(--ok)}
 .tag{font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--tx3);padding:2px 7px;border:1px solid var(--line2);border-radius:6px;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;max-width:200px;overflow:hidden;text-overflow:ellipsis}
 .tag.src{text-transform:none;letter-spacing:0}
+.tag.heli{color:#c48cf5;border-color:rgba(196,140,245,.45)}
+.tag.ems{color:#7fd6c9;border-color:rgba(127,214,201,.45)}
 .tm{text-align:right;font-size:11px;color:var(--tx3);line-height:1.35;display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-variant-numeric:tabular-nums}
 .tm b{font-size:14px;color:var(--tx);font-weight:600}
 .tm .rel{color:var(--tx2)}

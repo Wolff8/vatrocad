@@ -19,7 +19,8 @@ export function railHTML(f: Filters, c: FacetCounts): string {
     <button type="button" class="f fbtn ${n ? 'on' : ''}" data-open-filters aria-haspopup="dialog">${ic('filter')}<span>${T.filters}</span>${n ? `<span class="n">${n}</span>` : ''}</button>
     <div class="fg" role="radiogroup" aria-label="Časovno okno">${WINDOWS.map((w) => chip('w', String(w.h), w.label, f.w === w.h, c.w[String(w.h)] ?? 0)).join('')}</div>
     <div class="fg" role="radiogroup" aria-label="Stanje">${chip('s', 'active', 'Aktivno', f.s === 'active', c.s['active'] ?? 0, 'bolt')}</div>
-    <div class="fg" role="radiogroup" aria-label="Vrsta vira">${KINDS.map((k) => chip('k', k, KIND[k].label, f.k === k, c.k[k] ?? 0, KIND[k].icon)).join('')}</div>`;
+    <div class="fg" role="radiogroup" aria-label="Vrsta vira">${KINDS.map((k) => chip('k', k, KIND[k].label, f.k === k, c.k[k] ?? 0, KIND[k].icon)).join('')}</div>
+    <div class="fg" role="radiogroup" aria-label="Reševalci">${chip('t', 'heli', 'Helikopter', f.t === 'heli', c.t['heli'] ?? 0, 'heli')}${chip('t', 'ems', 'Reševalci', f.t === 'ems', c.t['ems'] ?? 0, 'ems')}</div>`;
 }
 
 /** Full filter panel (sheet). */
@@ -33,6 +34,10 @@ export function panelHTML(f: Filters, c: FacetCounts, hasPos: boolean, geoBusy: 
     ${group('Stanje', STATUS_CHIPS.map((s) => chip('s', s.v, s.label, f.s === s.v, c.s[s.v] ?? 0)).join(''), 's')}
     ${group('Vrsta vira', chip('k', 'all', 'Vsi', f.k === 'all', c.k['all'] ?? 0) + KINDS.map((k) => chip('k', k, KIND[k].label, f.k === k, c.k[k] ?? 0, KIND[k].icon)).join(''), 'k')}
     ${group('Kategorija', chip('cat', 'all', 'Vse', f.cat === 'all', c.cat['all'] ?? 0) + CATEGORIES.map((k) => chip('cat', k, CAT[k].short, f.cat === k, c.cat[k] ?? 0, CAT[k].icon)).join(''), 'cat')}
+    ${group('Reševalci in helikopter', chip('t', 'all', 'Vse', f.t === 'all', c.t['all'] ?? 0)
+      + chip('t', 'heli', 'Reševalni helikopter', f.t === 'heli', c.t['heli'] ?? 0, 'heli')
+      + chip('t', 'ems', 'Reševalci / NMP', f.t === 'ems', c.t['ems'] ?? 0, 'ems')
+      + '<p class="hint">Dogodki, pri katerih besedilo omenja Christophorus / reševalni helikopter oziroma reševalce, zdravnika NMP ali Rdeči križ.</p>', 't')}
     ${group('Regija', chip('r', 'all', 'Vse regije', f.r === 'all', c.r['all'] ?? 0) + regionEntries.map(([k, l]) => chip('r', k, l, f.r === k, c.r[k] ?? 0)).join(''), 'r')}
     ${group('Avstrija', `<button type="button" class="f" role="switch" aria-checked="${f.b}" data-g="b" data-v="1">${ic('pin')}<span>Samo obmejni pas (Štajerska, Koroška)</span><span class="n">${c.b}</span></button>`, 'b')}
     ${group(T.nearby, `<button type="button" class="f" role="radio" aria-checked="${f.d === 0}" data-g="d" data-v="0">${ic('near')}<span>Izklopljeno</span></button>` +
